@@ -4,13 +4,13 @@ All rights reserved.
 
 This source code is licensed under the BSD-style license found in the
 LICENSE file in the root directory of this source tree.
-"""
 
-"""
+----------
+
 Script to package original Timit dataset into a form readable in
 wav2letter++ pipelines
 
-Command : prepare_data.py --src [...] --dst [...]
+Command : python3 prepare_data.py --src [...] --dst [...]
 
 Replace [...] with appropriate paths
 """
@@ -47,7 +47,7 @@ if __name__ == "__main__":
     sys.stdout.flush()
 
     in_phn_path = os.path.join(curdir, "phones.txt")
-    out_tkn_path = os.path.join(args.dst, "phones.txt")
+    out_tkn_path = os.path.join(args.dst, "data", "tokens.txt")
 
     with open(in_phn_path, "r") as fr:
         with open(out_tkn_path, "w") as fw:

@@ -26,7 +26,7 @@ W2lNumberedFilesDataset::W2lNumberedFilesDataset(
     const std::string& rootdir /* = "" */)
     : W2lDataset(dicts, batchsize, worldrank, worldsize),
       cumulativeSizes_({0}) {
-  auto paths_vec = split(',', paths);
+  auto pathsVec = split(',', paths);
   TargetExtMap targetExts;
   targetExts.insert({kTargetIdx, FLAGS_target});
   if (!FLAGS_lexicon.empty()) {
@@ -34,7 +34,7 @@ W2lNumberedFilesDataset::W2lNumberedFilesDataset(
   }
 
   int64_t curSize = 0;
-  for (const auto& p : paths_vec) {
+  for (const auto& p : pathsVec) {
     loaders_.emplace_back(
         pathsConcat(rootdir, trim(p)), FLAGS_input, targetExts);
     curSize += loaders_.back().size();
@@ -55,6 +55,10 @@ W2lNumberedFilesDataset::W2lNumberedFilesDataset(
       FLAGS_outputbinsize);
   shuffle(-1);
   LOG(INFO) << "Total batches (i.e. iters): " << sampleBatches_.size();
+}
+
+W2lNumberedFilesDataset::~W2lNumberedFilesDataset() {
+  threadpool_ = nullptr; // join all threads
 }
 
 std::vector<W2lLoaderData> W2lNumberedFilesDataset::getLoaderData(
@@ -82,7 +86,7 @@ std::vector<SpeechSampleMetaInfo> W2lNumberedFilesDataset::loadSampleSizes() {
       auto audiofile = l.filename(i, FLAGS_input);
       auto targetfile = l.filename(i, FLAGS_target);
       auto idx = cumulativeSizes_[j] + i;
-      auto info = speech::loadSoundInfo(audiofile.c_str());
+      auto info = w2l::loadSoundInfo(audiofile.c_str());
       auto durationMs =
           (static_cast<double>(info.frames) / info.samplerate) * 1e3;
       auto ref = loadTarget(targetfile);

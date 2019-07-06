@@ -11,7 +11,10 @@
 #include <float.h>
 #include <stdint.h>
 #include <limits>
-#include "Defines.h"
+
+#include <flashlight/flashlight.h>
+
+#include "criterion/Defines.h"
 
 namespace w2l {
 
@@ -75,17 +78,29 @@ dLogSumExp(T in1, T in2, T in3, T& d1, T& d2, T& d3, const float scale) {
   d3 += scale * (in3 / Z);
 }
 
-int64_t countRepeats(const int* labels, int64_t len);
+int countRepeats(const int* labels, int len);
 
-int64_t getTargetSize(const int* labels, int64_t len);
+int getTargetSize(const int* labels, int len);
+
+af::array getTargetSizeArray(const af::array& target, int maxSize);
 
 CriterionScaleMode getCriterionScaleMode(const std::string& onorm, bool sqnorm);
-
-CriterionScaleFn getCriterionScaleFn(CriterionScaleMode scale);
 
 // Input: N x T x B (type: float), Output: T x B (type: int)
 af::array viterbiPath(const af::array& input, const af::array& trans);
 
-fl::Variable getLinearTarget(const fl::Variable& target, intl T);
+fl::Variable getLinearTarget(const fl::Variable& target, int T);
+
+// workaround for https://github.com/arrayfire/arrayfire/issues/2273
+// use as a drop-in replacement for af::reorder
+inline af::array reorder(
+    const af::array& in,
+    const unsigned x,
+    const unsigned y = 1,
+    const unsigned z = 2,
+    const unsigned w = 3) {
+  const af::array& result = af::reorder(in, x, y, z, w);
+  return moddims(result, result.dims());
+}
 
 } // namespace w2l

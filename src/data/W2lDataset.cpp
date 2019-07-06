@@ -27,7 +27,7 @@ W2lDataset::W2lDataset(
       batchSize_(batchsize),
       worldRank_(worldrank),
       worldSize_(worldsize),
-      threadpool_(std::make_shared<fl::ThreadPool>(FLAGS_nthread)) {
+      threadpool_(fl::cpp::make_unique<fl::ThreadPool>(FLAGS_nthread)) {
   if (batchSize_ < 1 || worldRank_ < 0 || worldSize_ < 1 ||
       worldRank_ >= worldSize_) {
     LOG(FATAL) << "Invalid arguments!";
@@ -39,9 +39,7 @@ int64_t W2lDataset::size() const {
 }
 
 std::vector<af::array> W2lDataset::get(const int64_t idx) const {
-  if (idx < 0 || idx >= size()) {
-    LOG(FATAL) << "Invalid idx value - '" << idx << "', must be in [0, size())";
-  }
+  checkIndexBounds(idx);
 
   W2lFeatureData feat;
   if (FLAGS_nthread > 0) {
@@ -61,7 +59,7 @@ std::vector<af::array> W2lDataset::get(const int64_t idx) const {
         ? af::array(targetDims)
         : af::array(targetDims, targetData.data());
   }
-  result[kFileIdIdx] = feat.sampleIds.empty()
+  result[kSampleIdx] = feat.sampleIds.empty()
       ? af::array(feat.sampleIdsDims)
       : af::array(feat.sampleIdsDims, feat.sampleIds.data());
   return result;

@@ -10,25 +10,36 @@
 
 #include <flashlight/flashlight.h>
 
-namespace fl {
+namespace w2l {
 
 class WindowBase {
  public:
   WindowBase() {}
 
-  virtual Variable computeSingleStepWindow(
-      const Variable& prevAttn,
+  virtual fl::Variable computeSingleStepWindow(
+      const fl::Variable& prevAttn,
       int inputSteps,
       int batchSize,
       int step) = 0;
 
-  virtual Variable
+  virtual fl::Variable
   computeWindowMask(int targetLen, int inputSteps, int batchSize) = 0;
 
   virtual ~WindowBase() {}
+
+  void setBatchStat(int seqLen, int targetLen, int batchSize) {
+    inputLen_ = seqLen;
+    targetLen_ = targetLen;
+    batchSize_ = batchSize;
+  }
+
+ protected:
+  int inputLen_;
+  int targetLen_;
+  int batchSize_;
 
  private:
   FL_SAVE_LOAD()
 };
 
-} // namespace fl
+} // namespace w2l

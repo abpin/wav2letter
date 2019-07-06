@@ -11,14 +11,13 @@ target_sources(
   ${CMAKE_CURRENT_SOURCE_DIR}/Dictionary.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/Transforms.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/Utils.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/Utils-base.cpp
   )
 
 target_link_libraries(
   common
   INTERFACE
-  ${GLOG_LIBRARIES}
   ${GFLAGS_LIBRARIES}
-  ${ArrayFire_LIBRARIES}
   flashlight::flashlight
   )
 

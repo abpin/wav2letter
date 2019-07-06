@@ -6,14 +6,17 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include <flashlight/flashlight.h>
-#include <gtest/gtest.h>
-#include <module/module.h>
-#include <runtime/Serial.h>
-#include <runtime/SpeechStatMeter.h>
 #include <stdint.h>
 #include <unordered_map>
-#include "gmock/gmock.h"
+
+#include <gmock/gmock.h>
+#include <gtest/gtest.h>
+
+#include <flashlight/flashlight.h>
+
+#include "module/module.h"
+#include "runtime/Serial.h"
+#include "runtime/SpeechStatMeter.h"
 
 using namespace w2l;
 
@@ -42,7 +45,7 @@ TEST(RuntimeTest, LoadAndSave) {
   model.add(fl::Conv2D(4, 6, 2, 1));
   model.add(fl::GatedLinearUnit(2));
   model.add(fl::Dropout(0.2));
-  model.add(fl::Conv2D(3, 4, 3, 1, 1, 1, 0, 0, false));
+  model.add(fl::Conv2D(3, 4, 3, 1, 1, 1, 0, 0, 1, 1, false));
   model.add(fl::GatedLinearUnit(2));
   model.add(fl::Dropout(0.214));
 

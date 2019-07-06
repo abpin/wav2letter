@@ -46,22 +46,26 @@ std::pair<std::string, std::string> getStatus(
   insertItem(
       "runtime",
       format("%02d:%02d:%02d", (rt / 60 / 60), (rt / 60) % 60, rt % 60));
-  insertItem("ms(bch)", format("%.2f", meters.timer.value() * 1000));
-  insertItem("ms(smp)", format("%.2f", meters.sampletimer.value() * 1000));
-  insertItem("ms(fwd)", format("%.2f", meters.fwdtimer.value() * 1000));
+  insertItem("bch(ms)", format("%.2f", meters.timer.value() * 1000));
+  insertItem("smp(ms)", format("%.2f", meters.sampletimer.value() * 1000));
+  insertItem("fwd(ms)", format("%.2f", meters.fwdtimer.value() * 1000));
   insertItem(
-      "ms(crit-fwd)", format("%.2f", meters.critfwdtimer.value() * 1000));
-  insertItem("ms(bwd)", format("%.2f", meters.bwdtimer.value() * 1000));
-  insertItem("ms(optim)", format("%.2f", meters.optimtimer.value() * 1000));
-  insertItem("loss", format("%10.5f", meters.loss.value()[0]));
+      "crit-fwd(ms)", format("%.2f", meters.critfwdtimer.value() * 1000));
+  insertItem("bwd(ms)", format("%.2f", meters.bwdtimer.value() * 1000));
+  insertItem("optim(ms)", format("%.2f", meters.optimtimer.value() * 1000));
+  insertItem("loss", format("%10.5f", meters.train.loss.value()[0]));
 
-  insertItem("train-" + errtype, format("%5.2f", meters.train.edit.value()[0]));
+  insertItem(
+      "train-" + errtype, format("%5.2f", meters.train.tknEdit.value()[0]));
+  insertItem("train-WER", format("%5.2f", meters.train.wrdEdit.value()[0]));
   for (auto& v : meters.valid) {
+    insertItem(v.first + "-loss", format("%10.5f", v.second.loss.value()[0]));
     insertItem(
-        v.first + "-" + errtype, format("%5.2f", v.second.edit.value()[0]));
+        v.first + "-" + errtype, format("%5.2f", v.second.tknEdit.value()[0]));
+    insertItem(v.first + "-WER", format("%5.2f", v.second.wrdEdit.value()[0]));
   }
   auto stats = meters.stats.value();
-  auto numsamples = std::max(stats[4], static_cast<intl>(1));
+  auto numsamples = std::max<int64_t>(stats[4], 1);
   auto isztotal = stats[0];
   auto tsztotal = stats[1];
   auto tszmax = stats[3];
@@ -85,18 +89,15 @@ std::pair<std::string, std::string> getStatus(
   return {header, status};
 }
 
-void print2file(std::ofstream& fs, const std::string& logstr) {
-  auto attempsLeft = kTryCatchAttempts;
-  do {
-    try {
-      fs << logstr << std::endl;
-      break;
-    } catch (...) {
-      --attempsLeft;
-      LOG_IF(ERROR, attempsLeft <= 0) << "Error while logging to file !";
-      std::this_thread::sleep_for(std::chrono::seconds(kTryCatchWaitSec));
+void appendToLog(std::ofstream& logfile, const std::string& logstr) {
+  auto write = [&]() {
+    logfile.clear(); // reset flags
+    logfile << logstr << std::endl;
+    if (!logfile) {
+      throw std::runtime_error("appending to log failed");
     }
-  } while (attempsLeft > 0);
+  };
+  retryWithBackoff(std::chrono::seconds(1), 1.0, 6, write);
 }
 
 af::array allreduceGet(fl::AverageValueMeter& mtr) {
@@ -116,7 +117,8 @@ af::array allreduceGet(fl::EditDistanceMeter& mtr) {
 }
 
 af::array allreduceGet(SpeechStatMeter& mtr) {
-  auto mtrVal = mtr.value();
+  auto mtrVal0 = mtr.value();
+  std::vector<long long> mtrVal(mtrVal0.begin(), mtrVal0.end());
   // Caveat: maxInputSz_, maxTargetSz_ would be approximate
   mtrVal[2] *= mtrVal[4];
   mtrVal[3] *= mtrVal[4];
@@ -124,7 +126,8 @@ af::array allreduceGet(SpeechStatMeter& mtr) {
 }
 
 af::array allreduceGet(fl::CountMeter& mtr) {
-  auto mtrVal = mtr.value();
+  auto mtrVal0 = mtr.value();
+  std::vector<long long> mtrVal(mtrVal0.begin(), mtrVal0.end());
   return af::array(mtrVal.size(), mtrVal.data());
 }
 
@@ -154,9 +157,9 @@ void allreduceSet(fl::EditDistanceMeter& mtr, af::array& val) {
 void allreduceSet(SpeechStatMeter& mtr, af::array& val) {
   mtr.reset();
   // Caveat: maxInputSz_, maxTargetSz_ would be approximate
-  auto valVec = afToVector<intl>(val);
+  auto valVec = afToVector<int64_t>(val);
   SpeechStats stats;
-  intl denom = (valVec[4] == 0) ? 1 : valVec[4];
+  auto denom = (valVec[4] == 0) ? 1 : valVec[4];
   stats.totalInputSz_ = valVec[0];
   stats.totalTargetSz_ = valVec[1];
   stats.maxInputSz_ = valVec[2] / denom;
@@ -167,7 +170,7 @@ void allreduceSet(SpeechStatMeter& mtr, af::array& val) {
 
 void allreduceSet(fl::CountMeter& mtr, af::array& val) {
   mtr.reset();
-  auto valVec = afToVector<intl>(val);
+  auto valVec = afToVector<long long>(val);
   for (size_t i = 0; i < valVec.size(); ++i) {
     mtr.add(i, valVec[i]);
   }
@@ -181,7 +184,6 @@ void allreduceSet(fl::TimeMeter& mtr, af::array& val) {
 
 template <>
 void syncMeter<TrainMeters>(TrainMeters& mtrs) {
-  syncMeter(mtrs.loss);
   syncMeter(mtrs.stats);
   syncMeter(mtrs.runtime);
   syncMeter(mtrs.timer);
@@ -189,11 +191,13 @@ void syncMeter<TrainMeters>(TrainMeters& mtrs) {
   syncMeter(mtrs.critfwdtimer);
   syncMeter(mtrs.bwdtimer);
   syncMeter(mtrs.optimtimer);
-  syncMeter(mtrs.train.edit);
-  syncMeter(mtrs.train.wordedit);
+  syncMeter(mtrs.train.tknEdit);
+  syncMeter(mtrs.train.wrdEdit);
+  syncMeter(mtrs.train.loss);
   for (auto& v : mtrs.valid) {
-    syncMeter(v.second.edit);
-    syncMeter(v.second.wordedit);
+    syncMeter(v.second.tknEdit);
+    syncMeter(v.second.wrdEdit);
+    syncMeter(v.second.loss);
   }
 }
 

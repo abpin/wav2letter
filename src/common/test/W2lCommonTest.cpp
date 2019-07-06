@@ -7,9 +7,10 @@
  */
 
 #include <glog/logging.h>
+#include <gmock/gmock.h>
 #include <gtest/gtest.h>
 
-#include <gmock/gmock.h>
+#include <future>
 #include <memory>
 
 #include "common/Dictionary.h"
@@ -94,11 +95,100 @@ TEST(W2lCommonTest, PathsConcat) {
   ASSERT_EQ(path2, "/tmp/test.wav");
 }
 
+static std::function<int(void)> makeSucceedsAfterIters(int iters) {
+  auto state = std::make_shared<int>(0);
+  return [state, iters]() {
+    if (++*state >= iters) {
+      return 42;
+    } else {
+      throw std::runtime_error("bleh");
+    }
+  };
+}
+
+static std::function<int(void)> makeSucceedsAfterMs(double ms) {
+  using namespace std::chrono;
+  auto state = std::make_shared<time_point<steady_clock>>();
+  return [state, ms]() {
+    auto now = steady_clock::now();
+    if (state->time_since_epoch().count() == 0) {
+      *state = now;
+    }
+    if (now - *state >= duration<double, std::milli>(ms)) {
+      return 42;
+    } else {
+      throw std::runtime_error("bleh");
+    }
+  };
+}
+
+template <class Fn>
+std::future<fl::cpp::result_of_t<Fn()>> retryAsync(
+    std::chrono::duration<double> initial,
+    double factor,
+    int64_t iters,
+    Fn f) {
+  return std::async(std::launch::async, [=]() {
+    return retryWithBackoff(initial, factor, iters, f);
+  });
+}
+
+TEST(W2lCommonTest, RetryWithBackoff) {
+  auto alwaysSucceeds = []() { return 42; };
+  auto alwaysFails = []() -> int { throw std::runtime_error("bleh"); };
+
+  std::vector<std::future<int>> goods;
+  std::vector<std::future<int>> bads;
+  std::vector<std::future<int>> invalids;
+
+  auto ms0 = std::chrono::milliseconds(0);
+  auto ms50 = std::chrono::milliseconds(50);
+
+  goods.push_back(retryAsync(ms0, 1.0, 5, alwaysSucceeds));
+  goods.push_back(retryAsync(ms50, 2.0, 5, alwaysSucceeds));
+
+  bads.push_back(retryAsync(ms0, 1.0, 5, alwaysFails));
+  bads.push_back(retryAsync(ms50, 2.0, 5, alwaysFails));
+
+  bads.push_back(retryAsync(ms0, 1.0, 5, makeSucceedsAfterIters(6)));
+  bads.push_back(retryAsync(ms50, 2.0, 5, makeSucceedsAfterIters(6)));
+  goods.push_back(retryAsync(ms0, 1.0, 5, makeSucceedsAfterIters(5)));
+  goods.push_back(retryAsync(ms50, 2.0, 5, makeSucceedsAfterIters(5)));
+
+  bads.push_back(retryAsync(ms0, 1.0, 5, makeSucceedsAfterMs(999)));
+  bads.push_back(retryAsync(ms50, 2.0, 5, makeSucceedsAfterMs(999)));
+  bads.push_back(retryAsync(ms0, 1.0, 5, makeSucceedsAfterMs(500)));
+  goods.push_back(retryAsync(ms50, 2.0, 5, makeSucceedsAfterMs(500)));
+
+  invalids.push_back(retryAsync(-ms50, 2.0, 5, alwaysSucceeds));
+  invalids.push_back(retryAsync(ms50, -1.0, 5, alwaysSucceeds));
+  invalids.push_back(retryAsync(ms50, 2.0, 0, alwaysSucceeds));
+  invalids.push_back(retryAsync(ms50, 2.0, -1, alwaysSucceeds));
+
+  for (auto& fut : goods) {
+    ASSERT_EQ(fut.get(), 42);
+  }
+  for (auto& fut : bads) {
+    ASSERT_THROW(fut.get(), std::runtime_error);
+  }
+  for (auto& fut : invalids) {
+    ASSERT_THROW(fut.get(), std::invalid_argument);
+  }
+
+  // check special case promise<void> / future<void>
+  auto alwaysSucceedsVoid = []() -> void {};
+  auto alwaysFailsVoid = []() -> void { throw std::runtime_error("bleh"); };
+
+  retryAsync(ms0, 1.0, 5, alwaysSucceedsVoid).get();
+  ASSERT_THROW(
+      retryAsync(ms0, 1.0, 5, alwaysFailsVoid).get(), std::runtime_error);
+}
+
 TEST(W2lCommonTest, Replabel) {
   Dictionary dict;
-  dict.addToken("1", 1);
-  dict.addToken("2", 2);
-  dict.addToken("3", 3);
+  dict.addEntry("1", 1);
+  dict.addEntry("2", 2);
+  dict.addEntry("3", 3);
   std::vector<int> lab = {5, 6, 6, 6, 10, 8, 8, 10, 10, 10, 10, 10};
 
   auto lab0 = lab;
@@ -134,34 +224,34 @@ TEST(W2lCommonTest, Replabel) {
 
 TEST(W2lCommonTest, Dictionary) {
   Dictionary dict;
-  dict.addToken("1", 1);
-  dict.addToken("2", 2);
-  dict.addToken("3", 3);
-  dict.addToken("4", 3);
+  dict.addEntry("1", 1);
+  dict.addEntry("2", 2);
+  dict.addEntry("3", 3);
+  dict.addEntry("4", 3);
 
-  ASSERT_EQ(dict.getToken(1), "1");
-  ASSERT_EQ(dict.getToken(3), "3");
+  ASSERT_EQ(dict.getEntry(1), "1");
+  ASSERT_EQ(dict.getEntry(3), "3");
 
   ASSERT_EQ(dict.getIndex("2"), 2);
   ASSERT_EQ(dict.getIndex("4"), 3);
 
-  ASSERT_EQ(dict.tokenSize(), 4);
+  ASSERT_EQ(dict.entrySize(), 4);
   ASSERT_EQ(dict.indexSize(), 3);
 
-  dict.addToken("5");
+  dict.addEntry("5");
   ASSERT_EQ(dict.getIndex("5"), 4);
-  ASSERT_EQ(dict.tokenSize(), 5);
+  ASSERT_EQ(dict.entrySize(), 5);
 
-  dict.addToken("6");
+  dict.addEntry("6");
   ASSERT_EQ(dict.getIndex("6"), 5);
   ASSERT_EQ(dict.indexSize(), 5);
 }
 
 TEST(W2lCommonTest, InvReplabel) {
   Dictionary dict;
-  dict.addToken("1", 1);
-  dict.addToken("2", 2);
-  dict.addToken("3", 3);
+  dict.addEntry("1", 1);
+  dict.addEntry("2", 2);
+  dict.addEntry("3", 3);
   std::vector<int> lab = {6, 3, 7, 2, 8, 0, 1};
 
   auto lab1 = lab;
@@ -257,6 +347,131 @@ TEST(W2lCommonTest, localNormalize) {
     auto arrNrm = af::array(arr.dims(), arrVecNrm.data());
     ASSERT_TRUE(af::allTrue<bool>(
         af::abs(arrNrm - afNormalize(arr, c.first, c.second)) < 1E-4));
+  }
+}
+
+TEST(W2lCommonTest, AfToVectorString) {
+  std::vector<int> arr = {119, 97,  118, -1,  -1,  -1,  -1,  -1, -1, -1, -1,
+                          -1,  108, 101, 116, 116, 101, 114, -1, -1, -1};
+  af::array afArr(6, 3, arr.data());
+  auto stringVec = afToVector<std::string>(afArr);
+  ASSERT_EQ(stringVec.size(), 3);
+  ASSERT_EQ(stringVec[0], "wav");
+  ASSERT_EQ(stringVec[1], "");
+  ASSERT_EQ(stringVec[2], "letter");
+}
+
+TEST(W2lCommonTest, WrdToTarget) {
+  gflags::FlagSaver flagsaver;
+  w2l::FLAGS_wordseparator = "_";
+
+  LexiconMap lexicon;
+  // word pieces with word separator in the end
+  lexicon["123"].push_back({"1", "23_"});
+  lexicon["456"].push_back({"456_"});
+  // word pieces with word separator in the beginning
+  lexicon["789"].push_back({"_7", "89"});
+  lexicon["010"].push_back({"_0", "10"});
+  // word pieces without word separators
+  lexicon["105"].push_back({"10", "5"});
+  lexicon["2100"].push_back({"2", "1", "00"});
+  // letters
+  lexicon["888"].push_back({"8", "8", "8"});
+  lexicon["12"].push_back({"1", "2"});
+  lexicon[kUnkToken] = {};
+
+  Dictionary dict;
+  for (auto l : lexicon) {
+    for (auto p : l.second) {
+      for (auto c : p) {
+        if (!dict.contains(c)) {
+          dict.addEntry(c);
+        }
+      }
+    }
+  }
+  dict.addEntry("_");
+
+  std::vector<std::string> words = {"123", "456"};
+  auto target = wrd2Target(words, lexicon, dict);
+  ASSERT_THAT(target, ::testing::ElementsAreArray({"1", "23_", "456_"}));
+
+  std::vector<std::string> words1 = {"789", "010"};
+  auto target1 = wrd2Target(words1, lexicon, dict);
+  ASSERT_THAT(target1, ::testing::ElementsAreArray({"_7", "89", "_0", "10"}));
+
+  std::vector<std::string> words2 = {"105", "2100"};
+  auto target2 = wrd2Target(words2, lexicon, dict);
+  ASSERT_THAT(
+      target2, ::testing::ElementsAreArray({"10", "5", "_", "2", "1", "00"}));
+
+  std::vector<std::string> words3 = {"12", "888", "12"};
+  auto target3 = wrd2Target(words3, lexicon, dict);
+  ASSERT_THAT(
+      target3,
+      ::testing::ElementsAreArray(
+          {"1", "2", "_", "8", "8", "8", "_", "1", "2"}));
+
+  // unknown words "111", "199"
+  std::vector<std::string> words4 = {"111", "789", "199"};
+  // fall back to letters and skip unknown
+  auto target4 = wrd2Target(words4, lexicon, dict, true, true);
+  ASSERT_THAT(
+      target4,
+      ::testing::ElementsAreArray({"1", "1", "1", "_7", "89", "_", "1"}));
+  // skip unknown
+  target4 = wrd2Target(words4, lexicon, dict, false, true);
+  ASSERT_THAT(target4, ::testing::ElementsAreArray({"_7", "89"}));
+}
+
+TEST(W2lCommonTest, TargetToSingleLtr) {
+  gflags::FlagSaver flagsaver;
+  w2l::FLAGS_wordseparator = "_";
+  w2l::FLAGS_usewordpiece = true;
+
+  Dictionary dict;
+  for (int i = 0; i < 10; ++i) {
+    dict.addEntry(std::to_string(i), i);
+  }
+  dict.addEntry("_", 10);
+  dict.addEntry("23_", 230);
+  dict.addEntry("456_", 4560);
+
+  std::vector<int> words = {1, 230, 4560};
+  auto target = tknIdx2Ltr(words, dict);
+  ASSERT_THAT(
+      target, ::testing::ElementsAreArray({"1", "2", "3", "_", "4", "5", "6"}));
+}
+
+TEST(W2lCommonTest, UT8Split) {
+  // ASCII
+  std::string in1 = "Vendetta";
+  auto in1Tkns = splitWrd(in1);
+  for (int i = 0; i < in1.size(); ++i) {
+    ASSERT_EQ(std::string(1, in1[i]), in1Tkns[i]);
+  }
+
+  // NFKC encoding
+  // @lint-ignore TXT5 Source code should only include printable US-ASCII bytes.
+  std::string in2 = "Beyoncé";
+  auto in2Tkns = splitWrd(in2);
+
+  // @lint-ignore TXT5 Source code should only include printable US-ASCII bytes.
+  std::vector<std::string> in2TknsExp = {"B", "e", "y", "o", "n", "c", "é"};
+  ASSERT_EQ(in2Tkns.size(), 7);
+  for (int i = 0; i < in2Tkns.size(); ++i) {
+    ASSERT_EQ(in2TknsExp[i], in2Tkns[i]);
+  }
+
+  // NFKD encoding
+  // @lint-ignore TXT5 Source code should only include printable US-ASCII bytes.
+  std::string in3 = "Beyoncé";
+  auto in3Tkns = splitWrd(in3);
+  std::vector<std::string> in3TknsExp = {
+      "B", "e", "y", "o", "n", "c", "e", u8"\u0301"};
+  ASSERT_EQ(in3Tkns.size(), 8);
+  for (int i = 0; i < in3Tkns.size(); ++i) {
+    ASSERT_EQ(in3TknsExp[i], in3Tkns[i]);
   }
 }
 

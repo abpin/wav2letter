@@ -4,9 +4,9 @@ All rights reserved.
 
 This source code is licensed under the BSD-style license found in the
 LICENSE file in the root directory of this source tree.
-"""
 
-"""
+----------
+
 Script to create LM data into a form readable in wav2letter++ decoder pipeline
 
 Please install `kenlm` on your own - https://github.com/kpu/kenlm
@@ -58,9 +58,9 @@ if __name__ == "__main__":
     os.system("{bin} {i}.tmp {o}".format(bin=binary, i=arpa_file, o=arpa_file + ".bin"))
     os.remove("{arpa}.tmp".format(arpa=arpa_file))
 
-    # write words to words.lst file
+    # write words to lexicon.txt file
     dict_file = os.path.join(lm_dir, "lexicon.txt")
-    sys.stdout.write("\nWriting dictionary file - {d}...\n\n".format(d=dict_file))
+    sys.stdout.write("\nWriting Lexicon file - {d}...\n\n".format(d=dict_file))
     sys.stdout.flush()
     with open(dict_file, "w") as f:
         # get all the words in the arpa file
@@ -74,6 +74,6 @@ if __name__ == "__main__":
                 if word == "<unk>" or word == "<s>" or word == "</s>":
                     continue
                 assert re.match("^[a-z']+$", word), "invalid word - {w}".format(w=word)
-                f.write("{w}\t{s}\n".format(w=word, s=" ".join(word)))
+                f.write("{w}\t{s} |\n".format(w=word, s=" ".join(word)))
 
     sys.stdout.write("Done !\n")

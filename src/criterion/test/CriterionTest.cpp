@@ -11,9 +11,10 @@
 #include <arrayfire.h>
 #include <array>
 
-#include <criterion/criterion.h>
+#include "criterion/criterion.h"
 
 using namespace fl;
+using namespace w2l;
 
 namespace {
 
@@ -66,12 +67,14 @@ TEST(CriterionTest, CTCEmptyTarget) {
   // Non-empty input, Empty target, batchsize > 0
   auto input = Variable(af::array(3, 2, 5), true);
   auto target = Variable(af::array(0, 5), false);
-  auto ctc = ConnectionistTemporalCriterion();
-  auto loss = ctc(input, target);
+  auto ctc = ConnectionistTemporalClassificationCriterion();
+  auto loss = ctc({input, target}).front();
   loss.backward();
   ASSERT_FALSE(af::anyTrue<bool>(af::isNaN(loss.array())));
 
-  auto func_conv_in = [&](Variable& inp) { return ctc.forward(inp, target); };
+  auto func_conv_in = [&](Variable& inp) {
+    return ctc.forward({inp, target}).front();
+  };
   jacobian_test(func_conv_in, input);
 }
 
@@ -82,22 +85,22 @@ TEST(CriterionTest, CTCCost) {
   std::array<int, 2> target1 = {0, 0};
   const int N1 = 2, L1 = 2, T1 = 3;
 
-  auto ctc1 = ConnectionistTemporalCriterion();
+  auto ctc1 = ConnectionistTemporalClassificationCriterion();
   auto input1af = Variable(af::array(N1, T1, input1.data()), true);
   auto target1af = Variable(af::array(L1, target1.data()), false);
 
-  auto loss1 = ctc1(input1af, target1af);
+  auto loss1 = ctc1({input1af, target1af}).front();
   ASSERT_NEAR(loss1.scalar<float>(), 0.0, kEpsilon);
 
   // Test case: 2
   std::array<int, 2> target2 = {1, 2};
   int N2 = 4, L2 = 2, T2 = 3;
 
-  auto ctc2 = ConnectionistTemporalCriterion();
+  auto ctc2 = ConnectionistTemporalClassificationCriterion();
   auto input2af = Variable(af::constant(0.0, N2, T2, f32), true);
   auto target2af = Variable(af::array(L2, target2.data()), false);
 
-  auto loss2 = ctc2(input2af, target2af);
+  auto loss2 = ctc2({input2af, target2af}).front();
   ASSERT_NEAR(loss2.scalar<float>(), -log(0.25 * 0.25 * 0.25 * 5), kEpsilon);
 }
 
@@ -106,9 +109,11 @@ TEST(CriterionTest, CTCJacobian) {
   auto in = Variable(af::log(af::randu(N, T)), true);
   auto t = af::abs(af::randu(L, af::dtype::s32)) % (N - 2);
   auto tgt = Variable(t.as(af::dtype::s32), false);
-  auto l =
-      ConnectionistTemporalCriterion(w2l::CriterionScaleMode::INPUT_SZ_SQRT);
-  auto func_conv_in = [&](Variable& inp) { return l.forward(inp, tgt); };
+  auto l = ConnectionistTemporalClassificationCriterion(
+      w2l::CriterionScaleMode::INPUT_SZ_SQRT);
+  auto func_conv_in = [&](Variable& inp) {
+    return l.forward({inp, tgt}).front();
+  };
   jacobian_test(func_conv_in, in);
 }
 
@@ -124,9 +129,11 @@ TEST(CriterionTest, Batching) {
       }
     }
     auto tgt = Variable(t.as(af::dtype::s32), false);
-    auto l =
-        ConnectionistTemporalCriterion(w2l::CriterionScaleMode::TARGET_SZ_SQRT);
-    auto func_conv_in = [&](Variable& inp) { return l.forward(inp, tgt); };
+    auto l = ConnectionistTemporalClassificationCriterion(
+        w2l::CriterionScaleMode::TARGET_SZ_SQRT);
+    auto func_conv_in = [&](Variable& inp) {
+      return l.forward({inp, tgt}).front();
+    };
     jacobian_test(func_conv_in, in);
   }
   {
@@ -140,11 +147,12 @@ TEST(CriterionTest, Batching) {
       }
     }
     auto tgt = Variable(t.as(af::dtype::s32), false);
-    auto l = ConnectionistTemporalCriterion(w2l::CriterionScaleMode::TARGET_SZ);
-    auto output = l.forward(in, tgt);
+    auto l = ConnectionistTemporalClassificationCriterion(
+        w2l::CriterionScaleMode::TARGET_SZ);
+    auto output = l.forward({in, tgt}).front();
 
     for (int i = 0; i < B; ++i) {
-      auto output_i = l.forward(in.slice(i), tgt.col(i));
+      auto output_i = l.forward({in.slice(i), tgt.col(i)}).front();
       checkZero(output.array()(i) - output_i.array(), 1E-6);
     }
   }
@@ -176,13 +184,13 @@ TEST(CriterionTest, CTCCompareTensorflow) {
       0.0663296, -0.356151, 0.280111,  0.00283995, 0.0035545,  0.00331533,
       -0.541765, 0.396634,  0.123377,  0.00648837, 0.00903441, 0.00623107};
 
-  auto ctc1 = ConnectionistTemporalCriterion();
+  auto ctc1 = ConnectionistTemporalClassificationCriterion();
   auto input1af = Variable(af::array(N1, T1, input1.data()), true);
   auto target1af = Variable(af::array(L1, target1.data()), false);
   auto grad_expected1af =
       Variable(af::array(N1, T1, grad_expected1.data()), false);
 
-  auto loss1 = ctc1(input1af, target1af);
+  auto loss1 = ctc1({input1af, target1af}).front();
   ASSERT_NEAR(loss1.scalar<float>(), loss_expected1, kEpsilon);
 
   loss1.backward();
@@ -211,13 +219,13 @@ TEST(CriterionTest, CTCCompareTensorflow) {
       -0.576714, 0.315517,  0.0338439, 0.0393744, 0.0339315, 0.154046,
   };
 
-  auto ctc2 = ConnectionistTemporalCriterion();
+  auto ctc2 = ConnectionistTemporalClassificationCriterion();
   auto input2af = Variable(af::array(N2, T2, input2.data()), true);
   auto target2af = Variable(af::array(L2, target2.data()), false);
   auto grad_expected2af =
       Variable(af::array(N2, T2, grad_expected2.data()), false);
 
-  auto loss2 = ctc2(input2af, target2af);
+  auto loss2 = ctc2({input2af, target2af}).front();
   ASSERT_NEAR(loss2.scalar<float>(), loss_expected2, kEpsilon);
 
   loss2.backward();
@@ -231,7 +239,7 @@ TEST(CriterionTest, ViterbiPath) {
   for (int j = 0; j < 5; ++j) {
     in(expectedpath1[j], j) = 2;
   }
-  ConnectionistTemporalCriterion ctc;
+  ConnectionistTemporalClassificationCriterion ctc;
   auto vpath1Arr = ctc.viterbiPath(in);
   af::array expPath1Arr = af::array(5, expectedpath1.data());
   checkZero(vpath1Arr - expPath1Arr);
@@ -242,20 +250,37 @@ TEST(CriterionTest, ViterbiPath) {
   checkZero(vpath1bArr - af::tile(expPath1Arr, 1, 2));
 
   // Test case: 2
-  std::array<float, 6> input = {1.0, 0.0, 0.0, 1.0, 1.0, 0.0};
-  af::array inputAf = af::array(2, 3, input.data());
-  std::array<float, 4> transition = {1.0, 0.0, 0.0, 1.0};
-  std::array<int, 3> expectedpath2 = {0, 0, 0};
-  AutoSegmentationCriterion asg(2);
-  asg.param(0).array() = af::array(2, 2, transition.data());
-  auto vpath2Arr = asg.viterbiPath(inputAf);
-  af::array expectedpath2Arr = af::array(3, expectedpath2.data());
-  checkZero(vpath2Arr - expectedpath2Arr);
+  constexpr int T2 = 4, N2 = 3;
 
-  // test batch input
-  auto inputtile = af::tile(inputAf, 1, 1, 2);
-  auto vpath2bArr = asg.viterbiPath(inputtile);
-  checkZero(vpath2bArr - af::tile(expectedpath2Arr, 1, 2));
+  // clang-format off
+  std::array<float, (T2 * N2)> input2Vec = {
+    0, 0, 7,
+    5, 4, 3,
+    5, 8, 5,
+    5, 4, 3,
+  };
+  std::array<float, (N2 * N2)> trans2Vec = {
+    0, 2, 0,
+    0, 0, 2,
+    2, 0, 0,
+  };
+  std::array<int, T2> expectedPath2Vec = {2, 1, 1, 0};
+  // clang-format on
+
+  af::array input2(N2, T2, input2Vec.data());
+  af::array trans2(N2, N2, trans2Vec.data());
+  af::array expectedPath2(T2, expectedPath2Vec.data());
+
+  AutoSegmentationCriterion asg(N2);
+  asg.setParams(Variable(trans2, true), 0);
+  auto path2 = asg.viterbiPath(input2);
+  checkZero(path2 - expectedPath2);
+
+  // Test case: 2b (batching)
+  auto input2b = af::tile(input2, 1, 1, 77);
+  auto expectedPath2b = af::tile(expectedPath2, 1, 77);
+  auto path2b = asg.viterbiPath(input2b);
+  checkZero(path2b - expectedPath2b);
 
   // If trasition probablities are same, CTC and ASG viterbi paths should match
   AutoSegmentationCriterion asg2(30);
@@ -408,7 +433,7 @@ TEST(CriterionTest, ASGCost) {
   auto target1af = Variable(af::array(L1, B1, target1.data()), false);
   asg1.setParams(Variable(af::array(N1, N1, trans1.data()), true), 0);
 
-  auto loss1 = asg1(input1af, target1af);
+  auto loss1 = asg1({input1af, target1af}).front();
   std::vector<float> loss1_host(B1);
   loss1.host(loss1_host.data());
   ASSERT_NEAR(loss1_host[0], -log(0.5), kEpsilon);
@@ -426,7 +451,7 @@ TEST(CriterionTest, ASGCost) {
   auto target2af = Variable(af::array(L2, target2.data()), false);
   asg2.setParams(Variable(af::array(N2, N2, trans2.data()), true), 0);
 
-  auto loss2 = asg2(input2af, target2af);
+  auto loss2 = asg2({input2af, target2af}).front();
   ASSERT_NEAR(loss2.scalar<float>(), log(32), kEpsilon);
 
   // Test case: 3
@@ -443,7 +468,8 @@ TEST(CriterionTest, ASGCost) {
   asg3.setParams(Variable(af::array(N3, N3, trans3.data()), true), 0);
   // check if target is truncated
   checkZero(
-      asg3(input3af, target3af1).array() - asg3(input3af, target3af2).array(),
+      asg3({input3af, target3af1}).front().array() -
+          asg3({input3af, target3af2}).front().array(),
       1E-5);
 }
 
@@ -456,14 +482,14 @@ TEST(CriterionTest, ASGJacobian) {
       AutoSegmentationCriterion(N, w2l::CriterionScaleMode::TARGET_SZ_SQRT);
 
   // Test case for input
-  auto func_in = [&](Variable& inp) { return l.forward(inp, tgt); };
+  auto func_in = [&](Variable& inp) { return l.forward({inp, tgt}).front(); };
   jacobian_test(func_in, in);
 
   // Test case for transition
   auto transition = Variable(af::randu(N, N), true);
   auto func_trans = [&](Variable& transition_p) {
     l.setParams(transition_p, 0);
-    return l.forward(in, tgt);
+    return l.forward({in, tgt}).front();
   };
   jacobian_test(func_trans, transition);
 }
@@ -477,14 +503,14 @@ TEST(CriterionTest, LinSegJacobian) {
       LinearSegmentationCriterion(N, w2l::CriterionScaleMode::TARGET_SZ_SQRT);
 
   // Test case for input
-  auto func_in = [&](Variable& inp) { return l.forward(inp, tgt); };
+  auto func_in = [&](Variable& inp) { return l.forward({inp, tgt}).front(); };
   jacobian_test(func_in, in);
 
   // Test case for transition
   auto transition = Variable(af::randu(N, N), true);
   auto func_trans = [&](Variable& transition_p) {
     l.setParams(transition_p, 0);
-    return l.forward(in, tgt);
+    return l.forward({in, tgt}).front();
   };
   jacobian_test(func_trans, transition);
 }
@@ -501,10 +527,10 @@ TEST(CriterionTest, ASGBatching) {
   }
   auto tgt = Variable(t.as(af::dtype::s32), false);
   auto l = AutoSegmentationCriterion(N, w2l::CriterionScaleMode::TARGET_SZ);
-  auto output = l.forward(in, tgt);
+  auto output = l.forward({in, tgt}).front();
 
   for (int i = 0; i < B; ++i) {
-    auto output_i = l.forward(in.slice(i), tgt.col(i));
+    auto output_i = l.forward({in.slice(i), tgt.col(i)}).front();
     checkZero(output.array()(i) - output_i.array(), 1E-6);
   }
 }
@@ -578,7 +604,7 @@ TEST(CriterionTest, ASGCompareLua) {
   auto target_af = Variable(af::array(L, B, target.data()), false);
   asg.setParams(constant(0.0, af::dim4(N, N)), 0);
 
-  auto loss = asg(input_af, target_af);
+  auto loss = asg({input_af, target_af}).front();
   std::vector<float> loss_host(B);
   loss.host(loss_host.data());
   for (int i = 0; i < B; i++) {
@@ -665,7 +691,7 @@ TEST(CriterionTest, LinSegCompareLua) {
   };
   // clang-format on
 
-  auto loss = linseg(input_af, target_af);
+  auto loss = linseg({input_af, target_af}).front();
   std::vector<float> loss_host(B);
   loss.host(loss_host.data());
   for (int i = 0; i < B; i++) {
@@ -680,7 +706,12 @@ TEST(CriterionTest, LinSegCompareLua) {
 }
 
 TEST(CriterionTest, AsgSerialization) {
-  const std::string path = "/tmp/" + std::string(getenv("USER")) + "_test.mdl";
+  char* user = getenv("USER");
+  std::string userstr = "unknown";
+  if (user != nullptr) {
+    userstr = std::string(user);
+  }
+  const std::string path = "/tmp/" + userstr + "_test.mdl";
   int N = 500;
 
   auto asg = std::make_shared<AutoSegmentationCriterion>(N);

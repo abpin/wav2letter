@@ -8,7 +8,8 @@
 
 #pragma once
 
-#include <criterion/attention/MedianWindow.h>
-#include <criterion/attention/SoftWindow.h>
-#include <criterion/attention/StepWindow.h>
-#include <criterion/attention/WindowBase.h>
+#include "criterion/attention/MedianWindow.h"
+#include "criterion/attention/SoftPretrainWindow.h"
+#include "criterion/attention/SoftWindow.h"
+#include "criterion/attention/StepWindow.h"
+#include "criterion/attention/WindowBase.h"

@@ -11,10 +11,11 @@
 #include <arrayfire.h>
 #include <flashlight/flashlight.h>
 
-#include <criterion/attention/attention.h>
-#include <criterion/criterion.h>
+#include "criterion/attention/attention.h"
+#include "criterion/criterion.h"
 
 using namespace fl;
+using namespace w2l;
 
 TEST(Seq2SeqTest, Seq2Seq) {
   int nclass = 40;
@@ -48,7 +49,7 @@ TEST(Seq2SeqTest, Seq2Seq) {
   ASSERT_EQ(attention.dims(1), inputsteps);
   ASSERT_EQ(attention.dims(2), batchsize);
 
-  auto losses = seq2seq(noGrad(input), noGrad(target));
+  auto losses = seq2seq({noGrad(input), noGrad(target)}).front();
   ASSERT_EQ(losses.dims(0), batchsize);
 
   // Backward runs.
@@ -65,7 +66,7 @@ TEST(Seq2SeqTest, Seq2Seq) {
 
   // Check size 1 Target works
   target = target(0, af::span);
-  auto loss = seq2seq(noGrad(input), noGrad(target));
+  auto loss = seq2seq({noGrad(input), noGrad(target)}).front();
 
   // Make sure eval mode is not storing variables.
   seq2seq.eval();
@@ -224,7 +225,12 @@ TEST(Seq2SeqTest, Seq2SeqAttn) {
 }
 
 TEST(Seq2SeqTest, Serialization) {
-  const std::string path = "/tmp/" + std::string(getenv("USER")) + "_test.mdl";
+  char* user = getenv("USER");
+  std::string userstr = "unknown";
+  if (user != nullptr) {
+    userstr = std::string(user);
+  }
+  const std::string path = "/tmp/" + userstr + "_test.mdl";
 
   int N = 5, H = 8, B = 1, T = 10, U = 5, maxoutputlen = 100;
 
@@ -255,6 +261,123 @@ TEST(Seq2SeqTest, Serialization) {
   ASSERT_TRUE(allParamsClose(*loaded, *seq2seq));
   ASSERT_TRUE(allClose(outputl, output));
   ASSERT_TRUE(allClose(attentionl, attention));
+}
+
+TEST(Seq2SeqTest, BatchedDecoderStep) {
+  int N = 5, H = 8, B = 10, T = 20, maxoutputlen = 100;
+  std::vector<Seq2SeqCriterion> criterions{
+      Seq2SeqCriterion(
+          N, H, N - 1, maxoutputlen, std::make_shared<ContentAttention>()),
+      Seq2SeqCriterion(
+          N,
+          H,
+          N - 1,
+          maxoutputlen,
+          std::make_shared<NeuralContentAttention>(H))};
+
+  for (auto& seq2seq : criterions) {
+    seq2seq.eval();
+    std::vector<Variable> ys;
+    std::vector<Seq2SeqState> inStates(B);
+    std::vector<Seq2SeqState*> inStatePtrs(B);
+
+    auto input = noGrad(af::randn(H, T, 1, f32));
+    std::vector<std::vector<float>> single_scores(B);
+    std::vector<std::vector<float>> batched_scores;
+
+    for (int i = 0; i < B; i++) {
+      Variable y = constant(i % N, 1, s32, false);
+      ys.push_back(y);
+
+      inStates[i].alpha = noGrad(af::randn(1, T, 1, f32));
+      inStates[i].hidden = noGrad(af::randn(H, 1, 1, f32));
+      inStates[i].summary = noGrad(af::randn(H, 1, 1, f32));
+      inStatePtrs[i] = &inStates[i];
+
+      // Single forward
+      Seq2SeqState outstate;
+      Variable ox;
+      std::tie(ox, outstate) = seq2seq.decodeStep(input, y, inStates[i]);
+      ox = logSoftmax(ox, 0);
+      single_scores[i] = w2l::afToVector<float>(ox);
+    }
+
+    // Batched forward
+    std::vector<Seq2SeqStatePtr> outstates;
+    std::tie(batched_scores, outstates) =
+        seq2seq.decodeBatchStep(input, ys, inStatePtrs);
+
+    // Check
+    for (int i = 0; i < B; i++) {
+      for (int j = 0; j < N; j++) {
+        ASSERT_NEAR(single_scores[i][j], batched_scores[i][j], 1e-5);
+      }
+    }
+  }
+}
+
+TEST(Seq2SeqTest, Seq2SeqSampling) {
+  int N = 5, H = 8, B = 1, T = 10, U = 5, maxoutputlen = 100;
+  auto input = noGrad(af::randn(H, T, B, f32));
+  auto target = noGrad((af::randu(U, B, f32) * 0.99 * N).as(s32));
+
+  std::vector<std::string> samplingStrategy(
+      {w2l::kRandSampling, w2l::kModelSampling});
+
+  for (const auto& ss : samplingStrategy) {
+    Seq2SeqCriterion seq2seq(
+        N,
+        H,
+        N - 1,
+        maxoutputlen,
+        std::make_shared<ContentAttention>(),
+        nullptr,
+        false,
+        0,
+        0.05,
+        false,
+        ss);
+    seq2seq.train();
+
+    Variable output, attention;
+    std::tie(output, attention) = seq2seq.decoder(input, target);
+    ASSERT_EQ(attention.dims(), af::dim4({U, T, B}));
+    ASSERT_EQ(output.dims(), af::dim4({N, U, B, 1}));
+  }
+
+  Seq2SeqCriterion seq2seq1(
+      N,
+      H,
+      N - 1,
+      maxoutputlen,
+      std::make_shared<ContentAttention>(),
+      nullptr,
+      false,
+      60,
+      0.05,
+      false,
+      w2l::kRandSampling);
+  seq2seq1.train();
+
+  Variable output, attention;
+  std::tie(output, attention) = seq2seq1.vectorizedDecoder(input, target);
+  ASSERT_EQ(attention.dims(), af::dim4({U, T, B}));
+  ASSERT_EQ(output.dims(), af::dim4({N, U, B, 1}));
+
+  Seq2SeqCriterion seq2seq2(
+      N,
+      H,
+      N - 1,
+      maxoutputlen,
+      std::make_shared<ContentAttention>(),
+      nullptr,
+      false,
+      60,
+      0.05,
+      false,
+      w2l::kModelSampling);
+  seq2seq2.train();
+  ASSERT_THROW(seq2seq2.vectorizedDecoder(input, target), std::logic_error);
 }
 
 int main(int argc, char** argv) {

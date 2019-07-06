@@ -8,15 +8,18 @@
 
 #pragma once
 
-#include <unordered_map>
+#include <map>
 
 #include <flashlight/flashlight.h>
 
 #include "SpeechStatMeter.h"
 
+#define LOG_MASTER(lvl) LOG_IF(lvl, (fl::getWorldRank() == 0))
+
 namespace w2l {
-struct EditDistMeters {
-  fl::EditDistanceMeter edit, wordedit;
+struct DatasetMeters {
+  fl::EditDistanceMeter tknEdit, wrdEdit;
+  fl::AverageValueMeter loss;
 };
 
 struct TrainMeters {
@@ -28,10 +31,9 @@ struct TrainMeters {
   fl::TimeMeter bwdtimer{true}; // includes network + criterion time
   fl::TimeMeter optimtimer{true};
 
-  EditDistMeters train;
-  std::unordered_map<std::string, EditDistMeters> valid;
+  DatasetMeters train;
+  std::map<std::string, DatasetMeters> valid;
 
-  fl::AverageValueMeter loss;
   SpeechStatMeter stats;
 };
 
@@ -52,7 +54,7 @@ std::pair<std::string, std::string> getStatus(
     bool date = false,
     const std::string& separator = " ");
 
-void print2file(std::ofstream& fs, const std::string& logstr);
+void appendToLog(std::ofstream& logfile, const std::string& logstr);
 
 af::array allreduceGet(fl::AverageValueMeter& mtr);
 af::array allreduceGet(fl::EditDistanceMeter& mtr);

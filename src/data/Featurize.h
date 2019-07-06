@@ -13,8 +13,8 @@
 
 #include "common/Dictionary.h"
 #include "data/NumberedFilesLoader.h"
-#include "feature/FeatureParams.h"
-#include "feature/Sound.h"
+#include "data/Sound.h"
+#include "libraries/feature/FeatureParams.h"
 
 namespace w2l {
 
@@ -34,7 +34,7 @@ W2lFeatureData featurize(
     const std::vector<W2lLoaderData>& data,
     const DictionaryMap& dicts);
 
-speech::FeatureParams defineSpeechFeatureParams();
+FeatureParams defineSpeechFeatureParams();
 
 int64_t getSpeechFeatureSize();
 

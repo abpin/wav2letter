@@ -9,31 +9,38 @@
 #pragma once
 
 #include <memory>
+
 #include "SequenceCriterion.h"
 #include "common/Utils.h"
+#include "criterion/Defines.h"
 #include "criterion/attention/attention.h"
 #include "criterion/attention/window.h"
 
-namespace fl {
+namespace w2l {
+
+struct Seq2SeqState {
+  fl::Variable alpha;
+  fl::Variable hidden;
+  fl::Variable summary;
+  int step;
+  int peakAttnPos;
+  bool isValid;
+
+  Seq2SeqState() : step(0), peakAttnPos(-1), isValid(false) {}
+};
+
+typedef std::shared_ptr<Seq2SeqState> Seq2SeqStatePtr;
 
 class Seq2SeqCriterion : public SequenceCriterion {
  public:
-  struct DecoderState {
-    Variable alpha;
-    Variable hidden;
-    Variable summary;
-    int step;
-    DecoderState() : step(0) {}
-  };
-
   struct CandidateHypo {
     float score;
     std::vector<int> path;
-    DecoderState state;
+    Seq2SeqState state;
     explicit CandidateHypo() : score(0.0) {
       path.resize(0);
     };
-    CandidateHypo(float score_, std::vector<int> path_, DecoderState state_)
+    CandidateHypo(float score_, std::vector<int> path_, Seq2SeqState state_)
         : score(score_), path(path_), state(state_) {}
   };
 
@@ -46,26 +53,28 @@ class Seq2SeqCriterion : public SequenceCriterion {
       std::shared_ptr<WindowBase> window = nullptr,
       bool trainWithWindow = false,
       int pctTeacherForcing = 100,
-      bool useSequentialDecoder = false,
       double labelSmooth = 0.0,
-      bool inputFeeding = false);
+      bool inputFeeding = false,
+      std::string samplingStrategy = w2l::kRandSampling,
+      double gumbelTemperature = 1.0);
 
-  Variable forward(const Variable& input, const Variable& target) override;
+  std::vector<fl::Variable> forward(
+      const std::vector<fl::Variable>& inputs) override;
 
   /* Next step predictions are based on the target at
    * the previous time-step so this function should only
    * be used for training purposes. */
-  std::pair<Variable, Variable> decoder(
-      const Variable& input,
-      const Variable& target);
+  std::pair<fl::Variable, fl::Variable> decoder(
+      const fl::Variable& input,
+      const fl::Variable& target);
 
-  std::pair<Variable, Variable> vectorizedDecoder(
-      const Variable& input,
-      const Variable& target);
+  std::pair<fl::Variable, fl::Variable> vectorizedDecoder(
+      const fl::Variable& input,
+      const fl::Variable& target);
 
   af::array viterbiPath(const af::array& input) override;
 
-  std::pair<af::array, Variable> viterbiPathBase(
+  std::pair<af::array, fl::Variable> viterbiPathBase(
       const af::array& input,
       bool saveAttn);
 
@@ -79,24 +88,52 @@ class Seq2SeqCriterion : public SequenceCriterion {
 
   std::string prettyString() const override;
 
-  std::shared_ptr<Embedding> embedding() {
-    return std::static_pointer_cast<Embedding>(module(0));
+  std::shared_ptr<fl::Embedding> embedding() const {
+    return std::static_pointer_cast<fl::Embedding>(module(0));
   }
 
-  std::shared_ptr<RNN> decodeRNN() {
-    return std::static_pointer_cast<RNN>(module(1));
+  std::shared_ptr<fl::RNN> decodeRNN() const {
+    return std::static_pointer_cast<fl::RNN>(module(1));
   }
 
-  std::shared_ptr<Linear> linearOut() {
-    return std::static_pointer_cast<Linear>(module(2));
+  std::shared_ptr<fl::Linear> linearOut() const {
+    return std::static_pointer_cast<fl::Linear>(module(2));
   }
 
-  std::shared_ptr<AttentionBase> attention() {
+  std::shared_ptr<AttentionBase> attention() const {
     return std::static_pointer_cast<AttentionBase>(module(3));
   }
 
-  Variable startEmbedding() {
+  fl::Variable startEmbedding() const {
     return params_.back();
+  }
+
+  std::pair<std::vector<std::vector<float>>, std::vector<Seq2SeqStatePtr>>
+  decodeBatchStep(
+      const fl::Variable& xEncoded,
+      std::vector<fl::Variable>& ys,
+      const std::vector<Seq2SeqState*>& inStates,
+      const int attentionThreshold = std::numeric_limits<int>::infinity(),
+      const float smoothingTemperature = 1.0) const;
+
+  std::pair<fl::Variable, Seq2SeqState> decodeStep(
+      const fl::Variable& xEncoded,
+      const fl::Variable& y,
+      const Seq2SeqState& instate) const;
+
+  void clearWindow() {
+    trainWithWindow_ = false;
+    window_ = nullptr;
+  }
+
+  void setSampling(std::string newSamplingStrategy, int newPctTeacherForcing) {
+    pctTeacherForcing_ = newPctTeacherForcing;
+    samplingStrategy_ = newSamplingStrategy;
+    setUseSequentialDecoder();
+  }
+
+  void setGumbelTemperature(double temperature) {
+    gumbelTemperature_ = temperature;
   }
 
  private:
@@ -109,6 +146,8 @@ class Seq2SeqCriterion : public SequenceCriterion {
   double labelSmooth_;
   bool inputFeeding_;
   int nClass_;
+  std::string samplingStrategy_;
+  double gumbelTemperature_;
 
   FL_SAVE_LOAD_WITH_BASE(
       SequenceCriterion,
@@ -120,22 +159,47 @@ class Seq2SeqCriterion : public SequenceCriterion {
       useSequentialDecoder_,
       labelSmooth_,
       inputFeeding_,
-      nClass_)
+      nClass_,
+      fl::versioned(samplingStrategy_, 1),
+      fl::versioned(gumbelTemperature_, 2))
 
   Seq2SeqCriterion() = default;
 
-  std::pair<Variable, DecoderState> decodeStep(
-      const Variable& xEncoded,
-      const Variable& y,
-      const DecoderState& instate);
+  void setUseSequentialDecoder();
 };
 
-} // namespace fl
+w2l::Seq2SeqCriterion buildSeq2Seq(int numClasses, int eosIdx);
 
-namespace w2l {
+/* Decoder helpers */
+struct Seq2SeqDecoderBuffer {
+  fl::Variable input;
+  Seq2SeqState dummyState;
+  std::vector<fl::Variable> ys;
+  std::vector<Seq2SeqState*> prevStates;
+  int attentionThreshold;
+  double smoothingTemperature;
 
-fl::Seq2SeqCriterion buildSeq2Seq(int numClasses, int eosIdx);
+  Seq2SeqDecoderBuffer(int beamSize, int attnThre, int smootTemp)
+      : attentionThreshold(attnThre), smoothingTemperature(smootTemp) {
+    ys.reserve(beamSize);
+    prevStates.reserve(beamSize);
+  }
+};
 
+typedef std::shared_ptr<void> AMStatePtr;
+typedef std::function<
+    std::pair<std::vector<std::vector<float>>, std::vector<AMStatePtr>>(
+        const float*,
+        const int,
+        const int,
+        const std::vector<int>&,
+        const std::vector<AMStatePtr>&,
+        int&)>
+    AMUpdateFunc;
+
+AMUpdateFunc buildAmUpdateFunction(
+    std::shared_ptr<SequenceCriterion>& criterion);
 } // namespace w2l
 
-CEREAL_REGISTER_TYPE(fl::Seq2SeqCriterion)
+CEREAL_REGISTER_TYPE(w2l::Seq2SeqCriterion)
+CEREAL_CLASS_VERSION(w2l::Seq2SeqCriterion, 2)

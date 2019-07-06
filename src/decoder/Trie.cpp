@@ -6,46 +6,42 @@
  * LICENSE file in the root directory of this source tree.
  */
 
-#include <glog/logging.h>
 #include <math.h>
 #include <stdlib.h>
+#include <iostream>
 #include <limits>
 
-#include "Trie.hpp"
-
-const double kMinusLogThreshold = -39.14;
+#include "decoder/Trie.h"
 
 namespace w2l {
 
-TrieNodePtr Trie::getRoot() {
-  return root_;
+const double kMinusLogThreshold = -39.14;
+
+const TrieNode* Trie::getRoot() const {
+  return root_.get();
 }
 
-int Trie::getNumChildren() {
-  return nChildren_;
-}
-
-TrieNodePtr Trie::insert(
-    const std::vector<int>& indices,
-    const TrieLabelPtr label,
-    float score) {
+TrieNodePtr
+Trie::insert(const std::vector<int>& indices, int label, float score) {
   TrieNodePtr node = root_;
   for (int i = 0; i < indices.size(); i++) {
     int idx = indices[i];
-    if (idx < 0 || idx >= nChildren_) {
-      LOG(FATAL) << "[Trie] Invalid letter index: " << idx;
+    if (idx < 0 || idx >= maxChildren_) {
+      throw std::out_of_range(
+          "[Trie] Invalid letter index: " + std::to_string(idx));
     }
-    if (!node->children_[idx]) {
-      node->children_[idx] = std::make_shared<TrieNode>(nChildren_, idx);
+    if (node->children.find(idx) == node->children.end()) {
+      node->children[idx] = std::make_shared<TrieNode>(idx);
     }
-    node = node->children_[idx];
+    node = node->children[idx];
   }
-  if (node->nLabel_ < kTrieMaxLable) {
-    node->label_[node->nLabel_] = label;
-    node->score_[node->nLabel_] = score;
-    node->nLabel_++;
+  if (node->nLabel < kTrieMaxLabel) {
+    node->label[node->nLabel] = label;
+    node->score[node->nLabel] = score;
+    node->nLabel++;
   } else {
-    LOG(INFO) << "[Trie] Trie label number reached limit: " << kTrieMaxLable;
+    std::cerr << "[Trie] Trie label number reached limit: " << kTrieMaxLabel
+              << "\n";
   }
   return node;
 }
@@ -53,13 +49,14 @@ TrieNodePtr Trie::insert(
 TrieNodePtr Trie::search(const std::vector<int>& indices) {
   TrieNodePtr node = root_;
   for (auto idx : indices) {
-    if (idx < 0 || idx >= nChildren_) {
-      LOG(FATAL) << "[Trie] Invalid letter index: " << idx;
+    if (idx < 0 || idx >= maxChildren_) {
+      throw std::out_of_range(
+          "[Trie] Invalid letter index: " + std::to_string(idx));
     }
-    if (!node->children_[idx]) {
+    if (node->children.find(idx) == node->children.end()) {
       return nullptr;
     }
-    node = node->children_[idx];
+    node = node->children[idx];
   }
   return node;
 }
@@ -79,20 +76,19 @@ double TrieLogAdd(double log_a, double log_b) {
 }
 
 void smearNode(TrieNodePtr node, SmearingMode smearMode) {
-  node->maxScore_ = -std::numeric_limits<float>::infinity();
-  for (int idx = 0; idx < node->nLabel_; idx++) {
-    node->maxScore_ = TrieLogAdd(node->maxScore_, node->score_[idx]);
+  node->maxScore = -std::numeric_limits<float>::infinity();
+  for (int idx = 0; idx < node->nLabel; idx++) {
+    node->maxScore = TrieLogAdd(node->maxScore, node->score[idx]);
   }
-  for (auto child : node->children_) {
-    if (child) {
-      smearNode(child, smearMode);
-      if (smearMode == SmearingMode::LOGADD) {
-        node->maxScore_ = TrieLogAdd(node->maxScore_, child->maxScore_);
-      } else if (
-          smearMode == SmearingMode::MAX &&
-          child->maxScore_ > node->maxScore_) {
-        node->maxScore_ = child->maxScore_;
-      }
+  for (auto child : node->children) {
+    auto childNode = child.second;
+    smearNode(childNode, smearMode);
+    if (smearMode == SmearingMode::LOGADD) {
+      node->maxScore = TrieLogAdd(node->maxScore, childNode->maxScore);
+    } else if (
+        smearMode == SmearingMode::MAX &&
+        childNode->maxScore > node->maxScore) {
+      node->maxScore = childNode->maxScore;
     }
   }
 }

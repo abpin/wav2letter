@@ -4,17 +4,22 @@ All rights reserved.
 
 This source code is licensed under the BSD-style license found in the
 LICENSE file in the root directory of this source tree.
-"""
 
-"""
+----------
+
 Script to package original WSJ datasets into a form readable in wav2letter++
 pipelines
 
 Please install `sph2pipe` on your own -
-see https://www.ldc.upenn.edu/language-resources/tools/sphere-conversion-tools
+see https://www.ldc.upenn.edu/language-resources/tools/sphere-conversion-tools \
+  with commands :
 
-Command : prepare_data.py --wsj0 [...]/WSJ0/media \
-    --wsj1 [...]/WSJ1/media --dst [...] -sph2pipe [...]/sph2pipe_v2.5/sph2pipe
+  wget https://www.ldc.upenn.edu/sites/www.ldc.upenn.edu/files/ctools/sph2pipe_v2.5.tar.gz
+  tar -xzf sph2pipe_v2.5.tar.gz && cd sph2pipe_v2.5
+  gcc -o sph2pipe *.c -lm
+
+Command : python3 prepare_data.py --wsj0 [...]/WSJ0/media \
+    --wsj1 [...]/WSJ1/media --dst [...] --sph2pipe [...]/sph2pipe_v2.5/sph2pipe
 
 Replace [...] with appropriate paths
 """
@@ -155,9 +160,9 @@ if __name__ == "__main__":
             )
 
     # create letter dictionary
-    sys.stdout.write("creating letter list...\n")
+    sys.stdout.write("creating tokens list...\n")
     sys.stdout.flush()
-    with open(os.path.join(args.dst, "letters.txt"), "w") as f:
+    with open(os.path.join(args.dst, "data", "tokens.txt"), "w") as f:
         f.write("|\n")
         f.write("'\n")
         for alphabet in range(ord("a"), ord("z") + 1):

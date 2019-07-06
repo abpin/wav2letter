@@ -3,37 +3,57 @@ cmake_minimum_required(VERSION 3.5.1)
 project(wav2letter++)
 
 # ----------------------------- Setup -----------------------------
-set(CMAKE_MODULE_PATH "${CMAKE_SOURCE_DIR}/cmake/")
+set(CMAKE_MODULE_PATH "${PROJECT_SOURCE_DIR}/cmake")
 set(CMAKE_CXX_STANDARD 11)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
-set(CMAKE_CXX_EXTENSIONS OFF) # no compiler extensions like gnu++11
-
-# All include directories are based on namespace structure and use ./src
-# as their base directory
-include_directories(${CMAKE_SOURCE_DIR}/src)
 
 # ----------------------------- Configuration -----------------------------
 
-# Build tests
-option(BUILD_TESTS "Build tests for wav2letter++" ON)
-if (BUILD_TESTS)
-  enable_testing()
-  add_subdirectory(${CMAKE_SOURCE_DIR}/src/tests)
+option(W2L_BUILD_LIBRARIES_ONLY "Build wav2letter-libraries only" OFF)
+option(W2L_LIBRARIES_USE_CUDA "Use CUDA in libraries-only build" ON)
+option(W2L_LIBRARIES_USE_KENLM "Use KenLM in libraries-only build" ON)
+option(W2L_LIBRARIES_USE_MKL "Use MKL in libraries-only build" ON)
+option(W2L_BUILD_FOR_PYTHON "Build Python bindings" OFF)
+option(W2L_BUILD_TESTS "Build tests for wav2letter++" ON)
+option(W2L_BUILD_EXAMPLES "Build examples for wav2letter++" ON)
+option(W2L_BUILD_EXPERIMENTAL "Build internal experimental components for wav2letter++" OFF)
+option(W2L_BUILD_SCRIPTS "Build internal scripts for wav2letter++" OFF)
+
+# ------------------------- Dependency Fallback -------------------------
+
+if (W2L_LIBRARIES_USE_MKL)
+  find_package(MKL)
+  if (NOT MKL_FOUND)
+    message(WARNING "MKL not found; forcing W2L_LIBRARIES_USE_MKL=OFF.")
+    set(W2L_LIBRARIES_USE_MKL OFF CACHE BOOL "" FORCE)
+  endif ()
 endif ()
 
-# Build examples
-option(BUILD_EXAMPLES "Build examples for wav2letter++" ON)
+# ------------------------- Libraries-Only Build ------------------------------
+
+function(build_w2l_libraries)
+  set(W2L_COMPILE_DEFINITIONS
+    $<$<BOOL:${W2L_LIBRARIES_USE_CUDA}>:W2L_LIBRARIES_USE_CUDA>
+    $<$<BOOL:${W2L_LIBRARIES_USE_KENLM}>:W2L_LIBRARIES_USE_KENLM>
+    $<$<BOOL:${W2L_LIBRARIES_USE_MKL}>:W2L_LIBRARIES_USE_MKL>
+    )
+  add_subdirectory(${PROJECT_SOURCE_DIR}/src/libraries)
+  if (W2L_BUILD_FOR_PYTHON)
+    add_subdirectory(${PROJECT_SOURCE_DIR}/bindings/python)
+  endif ()
+endfunction ()
+
+if (W2L_BUILD_LIBRARIES_ONLY)
+  build_w2l_libraries()
+  return()
+endif ()
 
 # ------------------------ Global External Dependencies ------------------------
 # ArrayFire
+# The correct ArrayFire backend target is transitively included by flashlight
 find_package(ArrayFire 3.6.1 REQUIRED)
 if (ArrayFire_FOUND)
   message(STATUS "ArrayFire found (include: ${ArrayFire_INCLUDE_DIRS}, library: ${ArrayFire_LIBRARIES})")
-  if (AFML_USE_UNIFIED)
-    # Set the AF_PATH environment variable to wherever the ArrayFire libs are
-    # located so they can be loaded in the unified backend
-    set(ENV{AF_PATH} ${ArrayFire_LIBRARIES})
-  endif ()
 else()
   message(FATAL_ERROR "ArrayFire not found")
 endif()
@@ -70,38 +90,76 @@ endif()
 # ------------------------ flashlight ------------------------
 find_package(flashlight REQUIRED)
 if (flashlight_FOUND)
-  message("flashlight found (include: ${FLASHLIGHT_INCLUDE_DIRS} lib: flashlight::flashlight )")
+  message(STATUS "flashlight found (include: ${FLASHLIGHT_INCLUDE_DIRS} lib: flashlight::flashlight )")
   if (NOT TARGET flashlight::Distributed)
-    message(FATAL_ERROR "flashlight must be build in distributed mode or wav2letter++")
+    message(FATAL_ERROR "flashlight must be build in distributed mode for wav2letter++")
   else ()
     message(STATUS "flashlight built in distributed mode.")
+  endif ()
+  if (NOT TARGET flashlight::Contrib)
+    message(FATAL_ERROR "flashlight must be built with contrib features for wav2letter++")
+  else ()
+    message(STATUS "flashlight built with contrib features.")
   endif ()
 else()
   message(FATAL_ERROR "flashlight not found.")
 endif ()
 
+# "Import" flashlight backend variables using the dummy target
+if (TARGET flashlight::BACKEND_UNIFIED)
+  set(FLASHLIGHT_BACKEND "UNIFIED")
+  set(FLASHLIGHT_USE_UNIFIED ON)
+elseif (TARGET flashlight::BACKEND_CPU)
+  set(FLASHLIGHT_BACKEND "CPU")
+  set(FLASHLIGHT_USE_CPU ON)
+elseif (TARGET flashlight::BACKEND_CUDA)
+  set(FLASHLIGHT_BACKEND "CUDA")
+  set(FLASHLIGHT_USE_CUDA ON)
+elseif (TARGET flashlight::BACKEND_OPENCL)
+  set(FLASHLIGHT_BACKEND "OPENCL")
+  set(FLASHLIGHT_USE_OPENCL ON)
+else ()
+  message(FATAL_ERROR "could not determine flashlight backend")
+endif ()
+
+# ------------------ Configure Full Build ----------------------
+
+if (FLASHLIGHT_USE_CUDA)
+  set(W2L_LIBRARIES_USE_CUDA ON CACHE BOOL "" FORCE)
+endif ()
+set(W2L_LIBRARIES_USE_KENLM ON CACHE BOOL "" FORCE)
+
 # ------------------------ Components ------------------------
 
-# Common
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/common)
+# wav2letter-libraries
+build_w2l_libraries()
 
-# Feature
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/feature)
+# Common
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/common)
 
 # Runtime
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/runtime)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/runtime)
 
 # Module
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/module)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/module)
 
 # Decoder
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/decoder)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/decoder)
 
 # Criterion
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/criterion)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/criterion)
 
 # Data
-add_subdirectory(${CMAKE_CURRENT_SOURCE_DIR}/src/data)
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/data)
+
+# LM
+add_subdirectory(${PROJECT_SOURCE_DIR}/src/lm)
+
+# Tests
+if (W2L_BUILD_TESTS)
+  enable_testing()
+  add_subdirectory(${PROJECT_SOURCE_DIR}/src/tests)
+endif ()
 
 # ----------------------------- wav2letter++ lib  -----------------------------
 
@@ -122,8 +180,8 @@ target_link_libraries(
   PUBLIC
   common
   criterion
-  data
   decoder
+  lm
   module
   runtime
   )
@@ -131,8 +189,21 @@ target_link_libraries(
 target_include_directories(
   wav2letter++
   PUBLIC
+  ${PROJECT_SOURCE_DIR}/src # all includes are based at src/
   ${FLASHLIGHT_INCLUDE_DIRS} # includes are <flashlight/...>
   )
+
+# Build experimental assets if specified
+if (W2L_BUILD_EXPERIMENTAL)
+  message(STATUS "Building experimental assets.")
+  add_subdirectory(${PROJECT_SOURCE_DIR}/src/experimental)
+endif ()
+
+# Build scripts if specified
+if (W2L_BUILD_SCRIPTS)
+  message(STATUS "Building scripts.")
+  add_subdirectory(${PROJECT_SOURCE_DIR}/scripts)
+endif ()
 
 # ----------------------------- Train -----------------------------
 add_executable(
@@ -149,7 +220,7 @@ target_link_libraries(
 add_executable(
   Test
   Test.cpp
-)
+  )
 
 target_link_libraries(
   Test
@@ -160,7 +231,7 @@ target_link_libraries(
 add_executable(
   Decoder
   Decode.cpp
-)
+  )
 
 target_link_libraries(
   Decoder

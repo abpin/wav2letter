@@ -10,8 +10,8 @@
 
 #include <functional>
 
-#include <glog/logging.h>
 #include "common/Defines.h"
+#include "common/Utils-base.h"
 
 namespace w2l {
 
@@ -60,7 +60,8 @@ af::array pad(
     const int dim /* = 0 */,
     float val /* = 0.0 */) {
   if (size < 0) {
-    LOG(ERROR) << "Size must be non-negative. Given " << size;
+    throw std::invalid_argument(
+        "Size must be non-negative. Given: " + std::to_string(size));
   }
   auto opdims = in.dims();
   opdims[dim] += (size << 1);

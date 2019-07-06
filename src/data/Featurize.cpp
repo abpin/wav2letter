@@ -17,28 +17,29 @@
 #include "common/Defines.h"
 #include "common/Transforms.h"
 #include "common/Utils.h"
-#include "feature/Mfcc.h"
-#include "feature/Mfsc.h"
-#include "feature/PowerSpectrum.h"
+#include "libraries/feature/Mfcc.h"
+#include "libraries/feature/Mfsc.h"
+#include "libraries/feature/PowerSpectrum.h"
 
 namespace w2l {
 
 namespace {
 
-speech::Mfcc<float>& getMfcc() {
-  static speech::Mfcc<float> mfcc(defineSpeechFeatureParams());
+Mfcc<float>& getMfcc() {
+  static Mfcc<float> mfcc(defineSpeechFeatureParams());
   return mfcc;
 }
 
-speech::Mfsc<float>& getMfsc() {
-  static speech::Mfsc<float> mfsc(defineSpeechFeatureParams());
+Mfsc<float>& getMfsc() {
+  static Mfsc<float> mfsc(defineSpeechFeatureParams());
   return mfsc;
 }
 
-speech::PowerSpectrum<float>& getPowerSpectrum() {
-  static speech::PowerSpectrum<float> powspec(defineSpeechFeatureParams());
+PowerSpectrum<float>& getPowerSpectrum() {
+  static PowerSpectrum<float> powspec(defineSpeechFeatureParams());
   return powspec;
 }
+
 } // namespace
 
 W2lFeatureData featurize(
@@ -126,7 +127,7 @@ W2lFeatureData featurize(
       auto target = d.targets.find(targetType)->second;
 
       if (targetType == kTargetIdx) {
-        auto tgtVec = dict.mapTokensToIndices(target);
+        auto tgtVec = dict.mapEntriesToIndices(target);
         if (!FLAGS_surround.empty()) {
           auto idx = dict.getIndex(FLAGS_surround);
           tgtVec.emplace_back(idx);
@@ -153,7 +154,7 @@ W2lFeatureData featurize(
         feat.targets[targetType].resize(batchSz * maxTgtSize, padVal);
         feat.targetDims[targetType] = af::dim4(maxTgtSize, batchSz);
       } else if (targetType == kWordIdx) {
-        auto tgtVec = dict.mapTokensToIndices(target);
+        auto tgtVec = dict.mapEntriesToIndices(target);
         tgtFeat.emplace_back(tgtVec);
         maxTgtSize = std::max(maxTgtSize, tgtVec.size());
 
@@ -202,13 +203,13 @@ W2lFeatureData featurize(
         [](unsigned char c) -> int { return int(c); });
     offset += maxSampleIdLen;
   }
-  feat.sampleIdsDims = af::dim4(batchSz, maxSampleIdLen);
+  feat.sampleIdsDims = af::dim4(maxSampleIdLen, batchSz);
 
   return feat;
 }
 
-speech::FeatureParams defineSpeechFeatureParams() {
-  speech::FeatureParams params;
+FeatureParams defineSpeechFeatureParams() {
+  FeatureParams params;
 
   // PowerSpectrum, Mfsc, Mfcc
   params.samplingFreq = FLAGS_samplerate;

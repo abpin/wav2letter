@@ -8,12 +8,8 @@
 
 #pragma once
 
-#include <thread>
 #include <unordered_map>
 
-#include <cereal/archives/binary.hpp>
-#include <cereal/types/unordered_map.hpp>
-#include <cereal/types/vector.hpp>
 #include <flashlight/flashlight.h>
 #include <glog/logging.h>
 
@@ -22,54 +18,62 @@
 
 namespace w2l {
 
-class W2lSerializer {
+struct W2lSerializer {
  public:
-  template <typename... Args>
-  static void save(const std::string& filepath, Args&&... args) {
-    auto attemptsLeft = kTryCatchAttempts;
-    do {
-      try {
-        std::ofstream file(filepath, std::ios::binary);
-        file.clear();
-        {
-          cereal::BinaryOutputArchive ar(file);
-          ar(std::string(W2L_VERSION));
-          ar(std::forward<Args>(args)...);
-        }
-        file.close();
-        break;
-      } catch (const std::exception& ex) {
-        --attemptsLeft;
-        LOG_IF(FATAL, attemptsLeft <= 0)
-            << "Error while saving to file '" << filepath << "': " << ex.what();
-        std::this_thread::sleep_for(std::chrono::seconds(kTryCatchWaitSec));
-      }
-    } while (attemptsLeft > 0);
+  template <class... Args>
+  static void save(const std::string& filepath, const Args&... args) {
+    retryWithBackoff(
+        std::chrono::seconds(1),
+        2.0,
+        6,
+        saveImpl<Args...>,
+        filepath,
+        args...); // max wait 31s
   }
 
   template <typename... Args>
   static void load(const std::string& filepath, Args&... args) {
-    LOG_IF(FATAL, !fileExists(filepath))
-        << "File - '" << filepath << "' does not exist.";
-    auto attemptsLeft = kTryCatchAttempts;
-    do {
-      try {
-        std::ifstream file(filepath, std::ios::binary);
-        std::string version;
-        {
-          cereal::BinaryInputArchive ar(file);
-          ar(version);
-          ar(args...);
-        }
-        file.close();
-        break;
-      } catch (const std::exception& ex) {
-        --attemptsLeft;
-        LOG_IF(FATAL, attemptsLeft <= 0)
-            << "Error while loading file - '" << filepath << "': " << ex.what();
-        std::this_thread::sleep_for(std::chrono::seconds(kTryCatchWaitSec));
+    retryWithBackoff(
+        std::chrono::seconds(1),
+        2.0,
+        6,
+        loadImpl<Args...>,
+        filepath,
+        args...); // max wait 31s
+  }
+
+ private:
+  template <typename... Args>
+  static void saveImpl(const std::string& filepath, const Args&... args) {
+    try {
+      std::ofstream file(filepath, std::ios::binary);
+      if (!file.is_open()) {
+        throw std::runtime_error("failed to open file for writing");
       }
-    } while (attemptsLeft > 0);
+      cereal::BinaryOutputArchive ar(file);
+      ar(std::string(W2L_VERSION));
+      ar(args...);
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "Error while saving: " << ex.what() << "\n";
+      throw;
+    }
+  }
+
+  template <typename... Args>
+  static void loadImpl(const std::string& filepath, Args&... args) {
+    try {
+      std::ifstream file(filepath, std::ios::binary);
+      if (!file.is_open()) {
+        throw std::runtime_error("failed to open file for reading");
+      }
+      std::string version;
+      cereal::BinaryInputArchive ar(file);
+      ar(version);
+      ar(args...);
+    } catch (const std::exception& ex) {
+      LOG(ERROR) << "Error while loading: " << ex.what() << "\n";
+      throw;
+    }
   }
 };
 

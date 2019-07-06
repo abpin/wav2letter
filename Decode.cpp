@@ -24,30 +24,30 @@
 #include "common/Utils.h"
 #include "criterion/criterion.h"
 #include "data/Featurize.h"
-#include "data/W2lDataset.h"
-#include "data/W2lNumberedFilesDataset.h"
-#include "decoder/Decoder.hpp"
-#include "decoder/KenLM.hpp"
-#include "decoder/Trie.hpp"
+#include "decoder/Trie.h"
+#include "lm/ConvLM.h"
+#include "lm/KenLM.h"
 #include "module/module.h"
+#include "runtime/Data.h"
 #include "runtime/Logger.h"
 #include "runtime/Serial.h"
 
-#ifdef BUILD_FB_DEPENDENCIES
-#include "fb/W2lEverstoreDataset.h"
-#endif
+#include "decoder/LexiconFreeDecoder.h"
+#include "decoder/Seq2SeqDecoder.h"
+#include "decoder/TokenLMDecoder.h"
+#include "decoder/WordLMDecoder.h"
 
 using namespace w2l;
 
 int main(int argc, char** argv) {
   google::InitGoogleLogging(argv[0]);
+  google::InstallFailureSignalHandler();
   std::string exec(argv[0]);
   std::vector<std::string> argvs;
   for (int i = 0; i < argc; i++) {
     argvs.emplace_back(argv[i]);
   }
-  gflags::SetUsageMessage(
-      "Usage: \n " + exec + " [data_path] [dataset_name] [flags]");
+  gflags::SetUsageMessage("Usage: Please refer to https://git.io/fjVVq");
   if (argc <= 1) {
     LOG(FATAL) << gflags::ProgramUsage();
   }
@@ -55,22 +55,42 @@ int main(int argc, char** argv) {
   /* ===================== Parse Options ===================== */
   LOG(INFO) << "Parsing command line flags";
   gflags::ParseCommandLineFlags(&argc, &argv, false);
-  if (!FLAGS_flagsfile.empty()) {
-    LOG(INFO) << "Reading flags from file " << FLAGS_flagsfile;
-    gflags::ReadFromFlagsFile(FLAGS_flagsfile, argv[0], true);
+  auto flagsfile = FLAGS_flagsfile;
+  if (!flagsfile.empty()) {
+    LOG(INFO) << "Reading flags from file " << flagsfile;
+    gflags::ReadFromFlagsFile(flagsfile, argv[0], true);
   }
 
   /* ===================== Create Network ===================== */
-  std::shared_ptr<fl::Module> network;
-  std::shared_ptr<fl::SequenceCriterion> criterion;
-  if (!FLAGS_am.empty()) {
-    std::unordered_map<std::string, std::string> cfg;
-    LOG(INFO) << "[Network] Reading acoustic model from " << FLAGS_am;
+  if (FLAGS_emission_dir.empty() && FLAGS_am.empty()) {
+    LOG(FATAL) << "Both flags are empty: `-emission_dir` and `-am`";
+  }
 
+  EmissionSet emissionSet;
+  std::shared_ptr<fl::Module> network;
+  std::shared_ptr<SequenceCriterion> criterion;
+  std::unordered_map<std::string, std::string> cfg;
+
+  /* Using existing emissions */
+  if (!FLAGS_emission_dir.empty()) {
+    std::string cleanedTestPath = cleanFilepath(FLAGS_test);
+    std::string loadPath =
+        pathsConcat(FLAGS_emission_dir, cleanedTestPath + ".bin");
+    LOG(INFO) << "[Serialization] Loading file: " << loadPath;
+    W2lSerializer::load(loadPath, emissionSet);
+    gflags::ReadFlagsFromString(emissionSet.gflags, gflags::GetArgv0(), true);
+  }
+  /* Using acoustic model */
+  if (!FLAGS_am.empty()) {
+    LOG(INFO) << "[Network] Reading acoustic model from " << FLAGS_am;
+    af::setDevice(0);
     W2lSerializer::load(FLAGS_am, cfg, network, criterion);
     network->eval();
-
     LOG(INFO) << "[Network] " << network->prettyString();
+    if (criterion) {
+      criterion->eval();
+      LOG(INFO) << "[Criterion] " << criterion->prettyString();
+    }
     LOG(INFO) << "[Network] Number of params: " << numTotalParams(network);
 
     auto flags = cfg.find(kGflags);
@@ -79,92 +99,100 @@ int main(int argc, char** argv) {
     }
     LOG(INFO) << "[Network] Updating flags from config file: " << FLAGS_am;
     gflags::ReadFlagsFromString(flags->second, gflags::GetArgv0(), true);
-    gflags::ParseCommandLineFlags(&argc, &argv, false);
+  }
+
+  // override with user-specified flags
+  gflags::ParseCommandLineFlags(&argc, &argv, false);
+  if (!flagsfile.empty()) {
+    gflags::ReadFromFlagsFile(flagsfile, argv[0], true);
   }
 
   LOG(INFO) << "Gflags after parsing \n" << serializeGflags("; ");
 
   /* ===================== Create Dictionary ===================== */
-  auto word2spell = loadWords(FLAGS_lexicon, FLAGS_maxword);
+  auto dictPath = pathsConcat(FLAGS_tokensdir, FLAGS_tokens);
+  if (dictPath.empty() || !fileExists(dictPath)) {
+    throw std::runtime_error("Invalid dictionary filepath specified.");
+  }
+  Dictionary tokenDict(dictPath);
+  // Setup-specific modifications
+  for (int64_t r = 1; r <= FLAGS_replabel; ++r) {
+    tokenDict.addEntry(std::to_string(r));
+  }
+  // ctc expects the blank label last
+  if (FLAGS_criterion == kCtcCriterion) {
+    tokenDict.addEntry(kBlankToken);
+  }
+  if (FLAGS_eostoken) {
+    tokenDict.addEntry(kEosToken);
+  }
 
-  auto letterDict = makeDictionary(FLAGS_tokens);
-  int numClasses = letterDict.indexSize();
+  int numClasses = tokenDict.indexSize();
   LOG(INFO) << "Number of classes (network): " << numClasses;
 
   Dictionary wordDict;
-  for (auto& it : word2spell) {
-    wordDict.addToken(it.first);
+  LexiconMap lexicon;
+  if (!FLAGS_lexicon.empty()) {
+    lexicon = loadWords(FLAGS_lexicon, FLAGS_maxword);
+    wordDict = createWordDict(lexicon);
+    LOG(INFO) << "Number of words: " << wordDict.indexSize();
   }
-  wordDict.setDefaultIndex(wordDict.getIndex(kUnkToken));
-  LOG(INFO) << "Number of words: " << wordDict.indexSize();
 
-  DictionaryMap dicts;
-  dicts.insert({kTargetIdx, letterDict});
-  dicts.insert({kWordIdx, wordDict});
+  DictionaryMap dicts = {{kTargetIdx, tokenDict}, {kWordIdx, wordDict}};
 
   /* ===================== Create Dataset ===================== */
-  if (!(FLAGS_am.empty() ^ FLAGS_emission_dir.empty())) {
-    LOG(FATAL)
-        << "One and only one of flag -am and -emission_dir should be set.";
-  }
-
-  auto emissionSet = std::make_shared<EmissionSet>();
-
-  /* Using acoustic model */
-  if (!FLAGS_am.empty()) {
+  if (FLAGS_emission_dir.empty()) {
     // Load dataset
     int worldRank = 0;
     int worldSize = 1;
-    std::unique_ptr<W2lDataset> ds;
-    if (FLAGS_everstoredb) {
-#ifdef BUILD_FB_DEPENDENCIES
-      W2lEverstoreDataset::init(); // Required for everstore client
-      ds = std::unique_ptr<W2lEverstoreDataset>(new W2lEverstoreDataset(
-          FLAGS_test, dicts, 1, worldRank, worldSize, FLAGS_targettype));
-#else
-      LOG(FATAL) << "W2lEverstoreDataset not supported: "
-                 << "build with -DBUILD_FB_DEPENDENCIES";
-#endif
-    } else {
-      ds = std::unique_ptr<W2lNumberedFilesDataset>(new W2lNumberedFilesDataset(
-          FLAGS_test, dicts, 1, worldRank, worldSize, FLAGS_datadir));
-    }
+    auto ds =
+        createDataset(FLAGS_test, dicts, lexicon, 1, worldRank, worldSize);
+
     ds->shuffle(3);
     LOG(INFO) << "[Serialization] Running forward pass ...";
 
     int cnt = 0;
     for (auto& sample : *ds) {
-      auto rawEmission = network->forward(fl::input(sample[kInputIdx]));
+      auto rawEmission =
+          network->forward({fl::input(sample[kInputIdx])}).front();
       int N = rawEmission.dims(0);
       int T = rawEmission.dims(1);
 
       auto emission = afToVector<float>(rawEmission);
-      auto ltrTarget = afToVector<int>(sample[kTargetIdx]);
-      auto wrdTarget = afToVector<int>(sample[kWordIdx]);
-      emissionSet->emissions.emplace_back(emission);
-      emissionSet->wordTargets.emplace_back(wrdTarget);
-      emissionSet->letterTargets.emplace_back(ltrTarget);
-      emissionSet->emissionT.emplace_back(T);
-      emissionSet->emissionN = N;
-      if (FLAGS_criterion == kAsgCriterion) {
-        emissionSet->transition =
-            afToVector<float>(criterion->param(0).array());
+      auto tokenTarget = afToVector<int>(sample[kTargetIdx]);
+      auto wordTarget = afToVector<int>(sample[kWordIdx]);
+
+      // TODO: we will reform the w2l dataset so that the loaded word targets
+      // are strings already
+      std::vector<std::string> wordTargetStr;
+      if (!FLAGS_lexicon.empty() && FLAGS_criterion != kSeq2SeqCriterion) {
+        wordTargetStr = wrdIdx2Wrd(wordTarget, wordDict);
+      } else {
+        auto letterTarget = tknTarget2Ltr(tokenTarget, tokenDict);
+        wordTargetStr = tkn2Wrd(letterTarget);
       }
+
+      emissionSet.emissions.emplace_back(emission);
+      emissionSet.wordTargets.emplace_back(wordTargetStr);
+      emissionSet.tokenTargets.emplace_back(tokenTarget);
+      emissionSet.emissionT.emplace_back(T);
+      emissionSet.emissionN = N;
+
+      // while decoding we use batchsize 1 and hence ds only has 1 sampleid
+      emissionSet.sampleIds.emplace_back(
+          afToVector<std::string>(sample[kSampleIdx]).front());
 
       ++cnt;
       if (cnt == FLAGS_maxload) {
         break;
       }
     }
-  }
-  /* Using existing emissions */
-  else {
-    std::string loadPath = pathsConcat(FLAGS_emission_dir, FLAGS_test + ".bin");
-    LOG(INFO) << "[Serialization] Loading file: " << loadPath;
-    W2lSerializer::load(loadPath, emissionSet);
+    if (FLAGS_criterion == kAsgCriterion) {
+      emissionSet.transition = afToVector<float>(criterion->param(0).array());
+    }
   }
 
-  int nSample = emissionSet->emissions.size();
+  int nSample = emissionSet.emissions.size();
   nSample = FLAGS_maxload > 0 ? std::min(nSample, FLAGS_maxload) : nSample;
   int nSamplePerThread =
       std::ceil(nSample / static_cast<float>(FLAGS_nthread_decoder));
@@ -175,31 +203,32 @@ int main(int argc, char** argv) {
   std::vector<double> sliceWer(FLAGS_nthread_decoder);
   std::vector<double> sliceLer(FLAGS_nthread_decoder);
   std::vector<int> sliceNumWords(FLAGS_nthread_decoder, 0);
-  std::vector<int> sliceNumLetters(FLAGS_nthread_decoder, 0);
+  std::vector<int> sliceNumTokens(FLAGS_nthread_decoder, 0);
   std::vector<int> sliceNumSamples(FLAGS_nthread_decoder, 0);
   std::vector<double> sliceTime(FLAGS_nthread_decoder, 0);
 
   // Prepare criterion
-  ModelType modelType = ModelType::ASG;
+  CriterionType criterionType = CriterionType::ASG;
   if (FLAGS_criterion == kCtcCriterion) {
-    modelType = ModelType::CTC;
+    criterionType = CriterionType::CTC;
+  } else if (FLAGS_criterion == kSeq2SeqCriterion) {
+    criterionType = CriterionType::S2S;
   } else if (FLAGS_criterion != kAsgCriterion) {
     LOG(FATAL) << "[Decoder] Invalid model type: " << FLAGS_criterion;
   }
 
-  const auto& transition = emissionSet->transition;
+  const auto& transition = emissionSet.transition;
 
   // Prepare decoder options
   DecoderOptions decoderOpt(
       FLAGS_beamsize,
-      static_cast<float>(FLAGS_beamscore),
+      static_cast<float>(FLAGS_beamthreshold),
       static_cast<float>(FLAGS_lmweight),
       static_cast<float>(FLAGS_wordscore),
       static_cast<float>(FLAGS_unkweight),
-      FLAGS_forceendsil,
       FLAGS_logadd,
       static_cast<float>(FLAGS_silweight),
-      modelType);
+      criterionType);
 
   // Prepare log writer
   std::mutex hypMutex, refMutex, logMutex;
@@ -236,107 +265,183 @@ int main(int argc, char** argv) {
     logStream << logStr;
   };
 
+  // Build Language Model
+  int unkWordIdx = -1;
+
+  Dictionary usrDict = tokenDict;
+  if (FLAGS_decodertype == "wrd") {
+    usrDict = wordDict;
+    unkWordIdx = wordDict.getIndex(kUnkToken);
+  }
+
+  std::shared_ptr<LM> lm;
+  if (FLAGS_lmtype == "kenlm") {
+    lm = std::make_shared<KenLM>(FLAGS_lm, usrDict);
+    if (!lm) {
+      LOG(FATAL) << "[LM constructing] Failed to load LM: " << FLAGS_lm;
+    }
+  } else if (FLAGS_lmtype == "convlm") {
+    af::setDevice(0);
+    lm = std::make_shared<ConvLM>(
+        FLAGS_lm, FLAGS_lm_vocab, usrDict, FLAGS_lm_memory, FLAGS_beamsize);
+  } else {
+    LOG(FATAL) << "[LM constructing] Invalid LM Type: " << FLAGS_lmtype;
+  }
+  LOG(INFO) << "[Decoder] LM constructed.\n";
+
+  // Build Trie
+  int blankIdx =
+      FLAGS_criterion == kCtcCriterion ? tokenDict.getIndex(kBlankToken) : -1;
+  int silIdx = tokenDict.getIndex(FLAGS_wordseparator);
+  std::shared_ptr<Trie> trie = nullptr;
+  if (!FLAGS_lexicon.empty() && FLAGS_criterion != kSeq2SeqCriterion) {
+    trie = std::make_shared<Trie>(tokenDict.indexSize(), silIdx);
+    auto startState = lm->start(false);
+
+    for (auto& it : lexicon) {
+      const std::string& word = it.first;
+      int usrIdx = wordDict.getIndex(word);
+      float score = -1;
+      if (FLAGS_decodertype == "wrd") {
+        LMStatePtr dummyState;
+        std::tie(dummyState, score) = lm->score(startState, usrIdx);
+      }
+      for (auto& tokens : it.second) {
+        auto tokensTensor = tkn2Idx(tokens, tokenDict);
+        trie->insert(tokensTensor, usrIdx, score);
+      }
+    }
+    LOG(INFO) << "[Decoder] Trie planted.\n";
+
+    // Smearing
+    SmearingMode smear_mode = SmearingMode::NONE;
+    if (FLAGS_smearing == "logadd") {
+      smear_mode = SmearingMode::LOGADD;
+    } else if (FLAGS_smearing == "max") {
+      smear_mode = SmearingMode::MAX;
+    } else if (FLAGS_smearing != "none") {
+      LOG(FATAL) << "[Decoder] Invalid smearing mode: " << FLAGS_smearing;
+    }
+    trie->smear(smear_mode);
+    LOG(INFO) << "[Decoder] Trie smeared.\n";
+  }
+
   // Decoding
   auto runDecoder = [&](int tid, int start, int end) {
     try {
-      // Build Language Model
-      std::shared_ptr<LM> lm;
-      if (FLAGS_lmtype == "kenlm") {
-        lm = std::make_shared<KenLM>(FLAGS_lm);
-        if (!lm) {
-          LOG(FATAL) << "[LM constructing] Failed to load LM: " << FLAGS_lm;
+      // Note: These 2 GPU-dependent models should be placed on different cards
+      // for different threads and nthread_decoder should not be greater than
+      // the number of GPUs.
+      std::shared_ptr<SequenceCriterion> localCriterion = criterion;
+      std::shared_ptr<LM> localLm = lm;
+      if (FLAGS_lmtype == "convlm" || criterionType == CriterionType::S2S) {
+        if (tid >= af::getDeviceCount()) {
+          LOG(FATAL)
+              << "FLAGS_nthread_decoder exceeds the number of visible GPUs";
         }
-      } else {
-        LOG(FATAL) << "[LM constructing] Invalid LM Type: " << FLAGS_lmtype;
+        af::setDevice(tid);
       }
-      LOG(INFO) << "[Decoder] LM constructed.\n";
 
-      // Build Trie
-      if (std::strlen(kSilToken) != 1) {
-        LOG(FATAL) << "[Decoder] Invalid unknown_symbol: " << kSilToken;
-      }
-      if (std::strlen(kBlankToken) != 1) {
-        LOG(FATAL) << "[Decoder] Invalid unknown_symbol: " << kBlankToken;
-      }
-      int silIdx = letterDict.getIndex(kSilToken);
-      int blankIdx = FLAGS_criterion == kCtcCriterion
-          ? letterDict.getIndex(kBlankToken)
-          : -1;
-      int unkIdx = lm->index(kUnkToken);
-      std::shared_ptr<Trie> trie =
-          std::make_shared<Trie>(letterDict.indexSize(), silIdx);
-      auto start_state = lm->start(false);
-
-      for (auto& it : word2spell) {
-        std::string word = it.first;
-        int lmIdx = lm->index(word);
-        if (lmIdx == unkIdx) { // We don't insert unknown words
-          continue;
+      // Make a copy for non-main threads.
+      if (tid != 0) {
+        if (FLAGS_lmtype == "convlm") {
+          localLm = std::make_shared<ConvLM>(
+              FLAGS_lm,
+              FLAGS_lm_vocab,
+              usrDict,
+              FLAGS_lm_memory,
+              FLAGS_beamsize);
         }
-        float score;
-        auto dummyState = lm->score(start_state, lmIdx, score);
-        for (auto& spelling : it.second) {
-          auto spellingTensor = spelling2tensor(spelling, letterDict);
-          trie->insert(
-              spellingTensor,
-              std::make_shared<TrieLabel>(lmIdx, wordDict.getIndex(word)),
-              score);
+
+        if (criterionType == CriterionType::S2S) {
+          std::shared_ptr<fl::Module> dummyNetwork;
+          std::unordered_map<std::string, std::string> dummyCfg;
+          W2lSerializer::load(FLAGS_am, dummyCfg, dummyNetwork, localCriterion);
+          localCriterion->eval();
         }
       }
-      LOG(INFO) << "[Decoder] Trie planted.\n";
-
-      // Smearing
-      SmearingMode smear_mode = SmearingMode::NONE;
-      if (FLAGS_smearing == "logadd") {
-        smear_mode = SmearingMode::LOGADD;
-      } else if (FLAGS_smearing == "max") {
-        smear_mode = SmearingMode::MAX;
-      } else if (FLAGS_smearing != "none") {
-        LOG(FATAL) << "[Decoder] Invalid smearing mode: " << FLAGS_smearing;
-      }
-      trie->smear(smear_mode);
-      LOG(INFO) << "[Decoder] Trie smeared.\n";
 
       // Build Decoder
-      std::shared_ptr<TrieLabel> unk =
-          std::make_shared<TrieLabel>(unkIdx, wordDict.getIndex(kUnkToken));
-      Decoder decoder(trie, lm, silIdx, blankIdx, unk);
-      LOG(INFO) << "[Decoder] Decoder loaded in thread: " << tid;
+      std::unique_ptr<Decoder> decoder;
+
+      if (FLAGS_decodertype == "wrd") {
+        decoder.reset(new WordLMDecoder(
+            decoderOpt,
+            trie,
+            localLm,
+            silIdx,
+            blankIdx,
+            unkWordIdx,
+            transition));
+        LOG(INFO) << "[Decoder] Decoder with word-LM loaded in thread: " << tid;
+      } else if (FLAGS_decodertype == "tkn") {
+        if (criterionType == CriterionType::S2S) {
+          auto amUpdateFunc = buildAmUpdateFunction(localCriterion);
+          int eosIdx = tokenDict.getIndex(kEosToken);
+
+          decoder.reset(new Seq2SeqDecoder(
+              decoderOpt,
+              localLm,
+              eosIdx,
+              amUpdateFunc,
+              FLAGS_maxdecoderoutputlen,
+              static_cast<float>(FLAGS_hardselection),
+              static_cast<float>(FLAGS_softselection)));
+          LOG(INFO)
+              << "[Decoder] Seq2Seq decoder with token-LM loaded in thread: "
+              << tid;
+        } else if (!FLAGS_lexicon.empty()) {
+          decoder.reset(new TokenLMDecoder(
+              decoderOpt,
+              trie,
+              localLm,
+              silIdx,
+              blankIdx,
+              unkWordIdx,
+              transition));
+          LOG(INFO) << "[Decoder] Decoder with token-LM loaded in thread: "
+                    << tid;
+        } else {
+          decoder.reset(new LexiconFreeDecoder(
+              decoderOpt, localLm, silIdx, blankIdx, transition));
+          LOG(INFO)
+              << "[Decoder] Lexicon-free decoder with token-LM loaded in thread: "
+              << tid;
+        }
+      } else {
+        LOG(FATAL) << "Unsupported decoder type: " << FLAGS_decodertype;
+      }
 
       // Get data and run decoder
       TestMeters meters;
       int sliceSize = end - start;
       meters.timer.resume();
       for (int s = start; s < end; s++) {
-        auto emission = emissionSet->emissions[s];
-        auto wordTarget = emissionSet->wordTargets[s];
-        auto letterTarget = emissionSet->letterTargets[s];
-        auto T = emissionSet->emissionT[s];
-        auto N = emissionSet->emissionN;
+        auto emission = emissionSet.emissions[s];
+        auto wordTarget = emissionSet.wordTargets[s];
+        auto tokenTarget = emissionSet.tokenTargets[s];
+        auto sampleId = emissionSet.sampleIds[s];
+        auto T = emissionSet.emissionT[s];
+        auto N = emissionSet.emissionN;
 
-        std::vector<float> score;
-        std::vector<std::vector<int>> wordPredictions;
-        std::vector<std::vector<int>> letterPredictions;
-
-        std::tie(score, wordPredictions, letterPredictions) = decoder.decode(
-            decoderOpt, transition.data(), emission.data(), T, N);
+        // DecodeResult
+        auto results = decoder->decode(emission.data(), T, N);
 
         // Cleanup predictions
-        auto wordPrediction = wordPredictions[0];
-        auto letterPrediction = letterPredictions[0];
-        if (FLAGS_criterion == kCtcCriterion ||
-            FLAGS_criterion == kAsgCriterion) {
-          uniq(letterPrediction);
+        auto& rawWordPrediction = results[0].words;
+        auto& rawTokenPrediction = results[0].tokens;
+
+        auto letterTarget = tknTarget2Ltr(tokenTarget, tokenDict);
+        auto letterPrediction =
+            tknPrediction2Ltr(rawTokenPrediction, tokenDict);
+        std::vector<std::string> wordPrediction;
+        if (!FLAGS_lexicon.empty() && FLAGS_criterion != kSeq2SeqCriterion) {
+          rawWordPrediction =
+              validateIdx(rawWordPrediction, wordDict.getIndex(kUnkToken));
+          wordPrediction = wrdIdx2Wrd(rawWordPrediction, wordDict);
+        } else {
+          wordPrediction = tkn2Wrd(letterPrediction);
         }
-        if (FLAGS_criterion == kCtcCriterion) {
-          letterPrediction.erase(
-              std::remove(
-                  letterPrediction.begin(), letterPrediction.end(), blankIdx),
-              letterPrediction.end());
-        }
-        remapLabels(letterTarget, letterDict);
-        remapLabels(letterPrediction, letterDict);
-        validateWords(wordPrediction, wordDict.getIndex(kUnkToken));
 
         // Update meters & print out predictions
         meters.werSlice.add(wordPrediction, wordTarget);
@@ -348,19 +453,18 @@ int main(int argc, char** argv) {
           meters.wer.add(wordPrediction, wordTarget);
           meters.ler.add(letterPrediction, letterTarget);
 
-          auto wordTargetStr = tensor2words(wordTarget, wordDict);
-          auto wordPredictionStr = tensor2words(wordPrediction, wordDict);
+          auto wordTargetStr = join(" ", wordTarget);
+          auto wordPredictionStr = join(" ", wordPrediction);
 
           std::stringstream buffer;
           buffer << "|T|: " << wordTargetStr << std::endl;
           buffer << "|P|: " << wordPredictionStr << std::endl;
           if (FLAGS_showletters) {
-            buffer << "|t|: " << tensor2letters(letterTarget, letterDict)
-                   << std::endl;
-            buffer << "|p|: " << tensor2letters(letterPrediction, letterDict)
-                   << std::endl;
+            buffer << "|t|: " << join(" ", letterTarget) << std::endl;
+            buffer << "|p|: " << join(" ", letterPrediction) << std::endl;
           }
-          buffer << "[sample: " << s << ", WER: " << meters.wer.value()[0]
+          buffer << "[sample: " << sampleId
+                 << ", WER: " << meters.wer.value()[0]
                  << "\%, LER: " << meters.ler.value()[0]
                  << "\%, slice WER: " << meters.werSlice.value()[0]
                  << "\%, slice LER: " << meters.lerSlice.value()[0]
@@ -370,7 +474,7 @@ int main(int argc, char** argv) {
 
           std::cout << buffer.str();
           if (!FLAGS_sclite.empty()) {
-            std::string suffix = "(SPEAKER_" + std::to_string(s) + ")\n";
+            std::string suffix = " (" + sampleId + ")\n";
             writeHyp(wordPredictionStr + suffix);
             writeRef(wordTargetStr + suffix);
             writeLog(buffer.str());
@@ -379,7 +483,7 @@ int main(int argc, char** argv) {
 
         // Update conters
         sliceNumWords[tid] += wordTarget.size();
-        sliceNumLetters[tid] += letterTarget.size();
+        sliceNumTokens[tid] += letterTarget.size();
       }
       meters.timer.stop();
       sliceWer[tid] = meters.werSlice.value()[0];
@@ -393,14 +497,20 @@ int main(int argc, char** argv) {
 
   /* Spread threades */
   auto startThreads = [&]() {
-    fl::ThreadPool threadPool(FLAGS_nthread_decoder);
-    for (int i = 0; i < FLAGS_nthread_decoder; i++) {
-      int start = i * nSamplePerThread;
-      if (start >= nSample) {
-        break;
+    if (FLAGS_nthread_decoder == 1) {
+      runDecoder(0, 0, nSample);
+    } else if (FLAGS_nthread_decoder > 1) {
+      fl::ThreadPool threadPool(FLAGS_nthread_decoder);
+      for (int i = 0; i < FLAGS_nthread_decoder; i++) {
+        int start = i * nSamplePerThread;
+        if (start >= nSample) {
+          break;
+        }
+        int end = std::min((i + 1) * nSamplePerThread, nSample);
+        threadPool.enqueue(runDecoder, i, start, end);
       }
-      int end = std::min((i + 1) * nSamplePerThread, nSample);
-      threadPool.enqueue(runDecoder, i, start, end);
+    } else {
+      LOG(FATAL) << "Invalid nthread_decoder";
     }
   };
   auto timer = fl::TimeMeter();
@@ -409,16 +519,16 @@ int main(int argc, char** argv) {
   timer.stop();
 
   /* Compute statistics */
-  int totalLetters = 0, totalWords = 0, totalSamples = 0;
+  int totalTokens = 0, totalWords = 0, totalSamples = 0;
   for (int i = 0; i < FLAGS_nthread_decoder; i++) {
-    totalLetters += sliceNumLetters[i];
+    totalTokens += sliceNumTokens[i];
     totalWords += sliceNumWords[i];
     totalSamples += sliceNumSamples[i];
   }
   double totalWer = 0, totalLer = 0, totalTime = 0;
   for (int i = 0; i < FLAGS_nthread_decoder; i++) {
     totalWer += sliceWer[i] * sliceNumWords[i] / totalWords;
-    totalLer += sliceLer[i] * sliceNumLetters[i] / totalLetters;
+    totalLer += sliceLer[i] * sliceNumTokens[i] / totalTokens;
     totalTime += sliceTime[i];
   }
 

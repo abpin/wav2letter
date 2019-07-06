@@ -14,14 +14,15 @@
 #include <arrayfire.h>
 #include <array>
 
-#include <criterion/criterion.h>
+#include "criterion/criterion.h"
 
 using namespace fl;
+using namespace w2l;
 
 int main() {
   af::info();
   af::setDevice(1);
-  auto ctc = ConnectionistTemporalCriterion();
+  auto ctc = ConnectionistTemporalClassificationCriterion();
 
   int N = 30, T = 487, L = 34, B = 10;
 
@@ -37,16 +38,16 @@ int main() {
 
   Variable target(t, false);
   int ntimes = 50;
-  Variable b = ctc.forward(input, target);
+  Variable b = ctc.forward({input, target}).front();
   Variable gradoutput = Variable(af::randu(b.dims()) * 2 - 2, false);
   for (int i = 0; i < 5; ++i) {
-    b = ctc.forward(input, target);
+    b = ctc.forward({input, target}).front();
     b.backward();
   }
   af::sync();
   auto s = af::timer::start();
   for (int i = 0; i < ntimes; ++i) {
-    b = ctc.forward(input, target);
+    b = ctc.forward({input, target}).front();
     b.backward(gradoutput);
   }
   af::sync();
